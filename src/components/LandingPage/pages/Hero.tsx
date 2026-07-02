@@ -89,12 +89,12 @@ export function Hero({ onNavigate }: HeroProps) {
         }}
       />
 
-      <div className="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-20 w-full">
-        <div className="grid lg:grid-cols-2 gap-12 items-center">
-          
+      <div className="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-12 sm:py-20 w-full min-w-0">
+        <div className="grid lg:grid-cols-2 gap-12 items-center min-w-0">
+
           {/* Left Text Column */}
           <div
-            className={`space-y-8 transition-all duration-700 ease-out motion-reduce:transition-none motion-reduce:!translate-y-0 motion-reduce:!opacity-100 ${
+            className={`min-w-0 space-y-8 transition-all duration-700 ease-out motion-reduce:transition-none motion-reduce:!translate-y-0 motion-reduce:!opacity-100 ${
               mounted ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-6'
             }`}
           >
@@ -128,13 +128,11 @@ export function Hero({ onNavigate }: HeroProps) {
                 Watch Demo
               </button>
             </div>
-
-            
           </div>
 
           {/* Right Column: Clean Map Showcase + Smooth Flag Ticker Row Below */}
           <div
-            className={`flex flex-col items-center justify-center gap-8 transition-all duration-700 ease-out delay-150 motion-reduce:transition-none motion-reduce:!translate-y-0 motion-reduce:!opacity-100 ${
+            className={`min-w-0 flex flex-col items-center justify-center gap-8 transition-all duration-700 ease-out delay-150 motion-reduce:transition-none motion-reduce:!translate-y-0 motion-reduce:!opacity-100 ${
               mounted ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-6'
             }`}
           >
@@ -148,12 +146,12 @@ export function Hero({ onNavigate }: HeroProps) {
             </div>
 
             {/* Premium Fading Marquee Row Container */}
-            <div className="w-full max-w-[420px] relative mt-2">
+            <div className="w-full max-w-[420px] min-w-0 relative mt-2">
               {/* Subtle edge masks to give a premium right-to-left fading appearance */}
               <div className="absolute inset-y-0 left-0 w-12 bg-gradient-to-r from-[#eff2f2] to-transparent z-10 pointer-events-none" />
               <div className="absolute inset-y-0 right-0 w-12 bg-gradient-to-l from-[#eff2f2] to-transparent z-10 pointer-events-none" />
-              
-              <div className="w-full overflow-hidden flex whitespace-nowrap py-2">
+
+              <div className="w-full min-w-0 overflow-hidden flex whitespace-nowrap py-2">
                 {/* Track Group 1 */}
                 <div className="flex gap-6 items-center shrink-0 animate-[tickerMarquee_70s_linear_infinite]">
                   {ALL_AFRICA_FLAGS.map((flag, idx) => (
@@ -167,7 +165,7 @@ export function Hero({ onNavigate }: HeroProps) {
                     </div>
                   ))}
                 </div>
-                
+
                 {/* Duplicated Track Group 2 to build a flawless infinite loop illusion */}
                 <div className="flex gap-6 items-center shrink-0 animate-[tickerMarquee_70s_linear_infinite]" aria-hidden="true">
                   {ALL_AFRICA_FLAGS.map((flag, idx) => (
