@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
+import { supabase } from '../lib/supabase';
 import {
   LayoutDashboard,
   Users,
@@ -22,6 +23,8 @@ import {
   Globe,
   Clock,
   UserCog,
+  CheckCheck,
+  Inbox,
 } from 'lucide-react';
 
 interface DashboardLayoutProps {
@@ -39,6 +42,14 @@ interface NavItem {
   icon: React.ReactNode;
   path?: string;
   children?: NavChild[];
+}
+
+interface NotificationRow {
+  id: string;
+  title: string;
+  message: string | null;
+  created_at: string;
+  read_at: string | null;
 }
 
 const navigationItems: NavItem[] = [
@@ -126,6 +137,18 @@ const navigationItems: NavItem[] = [
   },
 ];
 
+function timeAgo(iso: string): string {
+  const diffMs = Date.now() - new Date(iso).getTime();
+  const mins = Math.floor(diffMs / 60000);
+  if (mins < 1) return 'Just now';
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  const days = Math.floor(hrs / 24);
+  if (days < 7) return `${days}d ago`;
+  return new Date(iso).toLocaleDateString();
+}
+
 export function DashboardLayout({ children }: DashboardLayoutProps) {
   const navigate = useNavigate();
   const { admin, tenant, branch, branches, signOut, setBranch } = useAuth();
@@ -133,6 +156,87 @@ export function DashboardLayout({ children }: DashboardLayoutProps) {
   const [expandedItems, setExpandedItems] = useState<string[]>([]);
   const [branchDropdownOpen, setBranchDropdownOpen] = useState(false);
   const [currentPath, setCurrentPath] = useState('dashboard');
+
+  const [notifOpen, setNotifOpen] = useState(false);
+  const [notifications, setNotifications] = useState<NotificationRow[]>([]);
+  const [notifLoading, setNotifLoading] = useState(false);
+  const [notifError, setNotifError] = useState<string | null>(null);
+  const notifRef = useRef<HTMLDivElement>(null);
+
+  const unreadCount = notifications.filter((n) => !n.read_at).length;
+
+  // Assumes a `notifications` table scoped by tenant_id, optionally by
+  // admin_id for per-user notices. Adjust the `.eq(...)` filters below to
+  // match your actual schema once notifications are being written somewhere.
+  const loadNotifications = useCallback(async () => {
+    if (!tenant) return;
+    setNotifLoading(true);
+    setNotifError(null);
+    try {
+      const { data, error } = await supabase
+        .from('notifications')
+        .select('id, title, message, created_at, read_at')
+        .eq('tenant_id', tenant.id)
+        .order('created_at', { ascending: false })
+        .limit(20);
+      if (error) throw error;
+      setNotifications(data ?? []);
+    } catch (err) {
+      console.error('Error loading notifications:', err);
+      setNotifError(err instanceof Error ? err.message : 'Failed to load notifications');
+      setNotifications([]);
+    } finally {
+      setNotifLoading(false);
+    }
+  }, [tenant]);
+
+  useEffect(() => {
+    loadNotifications();
+  }, [loadNotifications]);
+
+  // Close the notifications dropdown when clicking outside it.
+  useEffect(() => {
+    if (!notifOpen) return;
+    const handleClickOutside = (e: MouseEvent) => {
+      if (notifRef.current && !notifRef.current.contains(e.target as Node)) {
+        setNotifOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [notifOpen]);
+
+  const markAsRead = async (id: string) => {
+    setNotifications((prev) =>
+      prev.map((n) => (n.id === id ? { ...n, read_at: n.read_at ?? new Date().toISOString() } : n))
+    );
+    try {
+      // Cast: `notifications` isn't in the generated Supabase types yet.
+      // Regenerate types once the table exists, then this cast can go away.
+      const { error } = await (supabase.from('notifications') as any)
+        .update({ read_at: new Date().toISOString() })
+        .eq('id', id);
+      if (error) throw error;
+    } catch (err) {
+      console.error('Error marking notification as read:', err);
+    }
+  };
+
+  const markAllAsRead = async () => {
+    const unreadIds = notifications.filter((n) => !n.read_at).map((n) => n.id);
+    if (unreadIds.length === 0) return;
+    const now = new Date().toISOString();
+    setNotifications((prev) => prev.map((n) => (n.read_at ? n : { ...n, read_at: now })));
+    try {
+      // Cast: `notifications` isn't in the generated Supabase types yet.
+      const { error } = await (supabase.from('notifications') as any)
+        .update({ read_at: now })
+        .in('id', unreadIds);
+      if (error) throw error;
+    } catch (err) {
+      console.error('Error marking all notifications as read:', err);
+    }
+  };
 
   const toggleExpanded = (label: string) => {
     setExpandedItems((prev) =>
@@ -187,19 +291,13 @@ export function DashboardLayout({ children }: DashboardLayoutProps) {
           sidebarOpen ? 'translate-x-0' : '-translate-x-full'
         }`}
       >
-        <div className="flex items-center justify-between p-4 border-b border-white/20">
-          <div className="flex items-center gap-3 min-w-0">
+        <div className="flex items-center justify-between p-3 border-b border-white/20">
+          <div className="flex items-center min-w-0 flex-1">
             <img
-              src="/logo.png"
+              src="/logo-bg.png"
               alt={tenant?.name || 'Trust Seed'}
-              className="w-10 h-10 rounded-xl object-contain bg-white p-1 flex-shrink-0"
+              className="h-20 w-auto max-w-[220px] object-contain rounded-md flex-shrink-0"
             />
-            <div className="min-w-0">
-              <h1 className="font-bold text-white text-sm truncate">
-                {tenant?.name || 'Trust Seed'}
-              </h1>
-              <p className="text-xs text-white/60">Financial Platform</p>
-            </div>
           </div>
           <button
             onClick={() => setSidebarOpen(false)}
@@ -348,13 +446,84 @@ export function DashboardLayout({ children }: DashboardLayoutProps) {
               )}
 
               {/* Notifications */}
-              <button
-                className="relative p-2 rounded-lg text-slate-600 hover:bg-slate-100 transition-colors"
-                aria-label="Notifications"
-              >
-                <Bell className="w-5 h-5" />
-                <span className="absolute top-1 right-1 w-2 h-2 bg-[#c46040] rounded-full" />
-              </button>
+              <div className="relative" ref={notifRef}>
+                <button
+                  onClick={() => setNotifOpen((prev) => !prev)}
+                  className="relative p-2 rounded-lg text-slate-600 hover:bg-slate-100 transition-colors"
+                  aria-label="Notifications"
+                  aria-expanded={notifOpen}
+                >
+                  <Bell className="w-5 h-5" />
+                  {unreadCount > 0 && (
+                    <span className="absolute top-1 right-1 min-w-[16px] h-4 px-1 bg-[#c46040] rounded-full text-[10px] font-semibold text-white flex items-center justify-center">
+                      {unreadCount > 9 ? '9+' : unreadCount}
+                    </span>
+                  )}
+                </button>
+
+                {notifOpen && (
+                  <div className="absolute right-0 mt-1 w-80 bg-white border border-[#dae1e1] rounded-lg shadow-lg overflow-hidden z-40">
+                    <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
+                      <h3 className="font-semibold text-slate-900 text-sm">Notifications</h3>
+                      {unreadCount > 0 && (
+                        <button
+                          onClick={markAllAsRead}
+                          className="text-xs text-[#1ebcb2] hover:text-[#641f60] font-medium flex items-center gap-1 transition-colors"
+                        >
+                          <CheckCheck className="w-3.5 h-3.5" />
+                          Mark all read
+                        </button>
+                      )}
+                    </div>
+
+                    <div className="max-h-96 overflow-y-auto">
+                      {notifLoading ? (
+                        <div className="p-4 space-y-3">
+                          {Array.from({ length: 3 }).map((_, idx) => (
+                            <div key={idx} className="animate-pulse">
+                              <div className="h-3.5 w-32 bg-slate-200 rounded mb-2" />
+                              <div className="h-3 w-48 bg-slate-100 rounded" />
+                            </div>
+                          ))}
+                        </div>
+                      ) : notifError ? (
+                        <div className="p-4 text-sm text-[#c46040]">{notifError}</div>
+                      ) : notifications.length === 0 ? (
+                        <div className="py-10 text-center px-4">
+                          <Inbox className="w-8 h-8 text-slate-300 mx-auto mb-2" />
+                          <p className="text-sm text-slate-500">No notifications yet</p>
+                        </div>
+                      ) : (
+                        <ul className="divide-y divide-slate-100">
+                          {notifications.map((n) => (
+                            <li key={n.id}>
+                              <button
+                                onClick={() => markAsRead(n.id)}
+                                className={`w-full text-left px-4 py-3 hover:bg-slate-50 transition-colors ${
+                                  !n.read_at ? 'bg-[#1ebcb2]/5' : ''
+                                }`}
+                              >
+                                <div className="flex items-start gap-2">
+                                  {!n.read_at && (
+                                    <span className="mt-1.5 w-1.5 h-1.5 rounded-full bg-[#ee7b22] flex-shrink-0" />
+                                  )}
+                                  <div className="min-w-0 flex-1">
+                                    <p className="text-sm font-medium text-slate-900 truncate">{n.title}</p>
+                                    {n.message && (
+                                      <p className="text-xs text-slate-500 mt-0.5 line-clamp-2">{n.message}</p>
+                                    )}
+                                    <p className="text-xs text-slate-400 mt-1">{timeAgo(n.created_at)}</p>
+                                  </div>
+                                </div>
+                              </button>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
 
               {/* User menu */}
               <div className="flex items-center gap-3">

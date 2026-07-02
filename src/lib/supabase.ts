@@ -372,6 +372,8 @@ export type Database = {
           amount: number;
           currency: string;
           fee_amount?: number;
+          fee_currency?: string | null;
+          exchange_rate?: number | null;
           from_wallet_id?: string | null;
           to_wallet_id?: string | null;
           from_customer_id?: string | null;
@@ -383,6 +385,7 @@ export type Database = {
           destination_country?: string | null;
           purpose?: string | null;
           notes?: string | null;
+          status?: TransactionStatus;
           is_international?: boolean;
           requires_compliance_check?: boolean;
           created_by: string;

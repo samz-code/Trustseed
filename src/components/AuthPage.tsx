@@ -17,9 +17,9 @@ import {
 } from 'lucide-react';
 
 const PLANS = [
-  { id: 'starter', label: 'Starter', price: 99 },
-  { id: 'professional', label: 'Professional', price: 250 },
-  { id: 'enterprise', label: 'Enterprise', price: 500 },
+  { id: 'starter', label: 'Starter', price: 250 },
+  { id: 'professional', label: 'Professional', price: 600 },
+  { id: 'enterprise', label: 'Enterprise', price: 1500 },
 ] as const;
 
 export function AuthPage() {
@@ -85,16 +85,12 @@ export function AuthPage() {
 
         <div className="relative z-10 flex flex-col justify-between w-full p-12 xl:p-16 2xl:p-20 text-white">
           {/* Brand lockup */}
-          <div className="flex items-center gap-4">
+          <div className="flex items-center">
             <img
-              src="/logo.png"
+              src="/logo-bg.png"
               alt="Trust Seed"
-              className="w-16 h-16 xl:w-20 xl:h-20 rounded-2xl object-contain bg-white p-2 shadow-lg"
+              className="h-16 xl:h-20 w-auto max-w-[280px] object-contain rounded-lg shadow-lg"
             />
-            <div>
-              <h1 className="text-2xl xl:text-3xl font-bold leading-tight">Trust Seed</h1>
-              <p className="text-sm text-white/70">Financial Platform</p>
-            </div>
           </div>
 
           {/* Value proposition */}
@@ -130,6 +126,7 @@ export function AuthPage() {
           >
             Developed by Emoni Samuel
           </a>
+          
         </div>
       </aside>
 
@@ -147,9 +144,9 @@ export function AuthPage() {
           {/* Mobile / tablet logo (brand panel is hidden below lg) */}
           <div className="lg:hidden text-center mb-10">
             <img
-              src="/logo.png"
+              src="/logo-bg.png"
               alt="Trust Seed"
-              className="w-24 h-24 sm:w-28 sm:h-28 rounded-2xl object-contain mx-auto mb-4"
+              className="h-20 sm:h-24 w-auto max-w-[260px] object-contain rounded-lg mx-auto mb-4"
             />
             <h1 className="text-2xl font-bold text-[#641f60]">Trust Seed</h1>
             <p className="text-slate-600 text-sm">Enterprise Financial Platform</p>

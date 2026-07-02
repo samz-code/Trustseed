@@ -8,8 +8,6 @@ import {
   ArrowRightLeft,
   Globe,
   Search,
-  Filter,
-  Calendar,
   Plus,
   X,
   Loader2,
@@ -20,31 +18,55 @@ import {
   RefreshCcw,
   DollarSign,
   Phone,
-  User
+  User,
+  Banknote,
+  PiggyBank,
+  Receipt,
 } from 'lucide-react';
 
-const TRANSACTION_TYPES = [
-  { value: 'deposit', label: 'Deposit', icon: '📥' },
-  { value: 'withdrawal', label: 'Withdrawal', icon: '📤' },
-  { value: 'transfer', label: 'Money Transfer', icon: '💸' },
-  { value: 'forex_buy', label: 'Forex Buy', icon: '💱' },
-  { value: 'forex_sell', label: 'Forex Sell', icon: '💱' },
-  { value: 'loan_disbursement', label: 'Loan Disbursement', icon: '🏦' },
-  { value: 'loan_repayment', label: 'Loan Repayment', icon: '💰' },
-  { value: 'savings_deposit', label: 'Savings Deposit', icon: '📈' },
-  { value: 'savings_withdrawal', label: 'Savings Withdrawal', icon: '📉' },
-  { value: 'float_allocation', label: 'Float Allocation', icon: '📊' },
+const TRANSACTION_TYPES: { value: Transaction['transaction_type']; label: string; icon: React.ReactNode }[] = [
+  { value: 'deposit', label: 'Deposit', icon: <ArrowDownRight className="w-5 h-5" /> },
+  { value: 'withdrawal', label: 'Withdrawal', icon: <ArrowUpRight className="w-5 h-5" /> },
+  { value: 'transfer', label: 'Money Transfer', icon: <ArrowRightLeft className="w-5 h-5" /> },
+  { value: 'forex_buy', label: 'Forex Buy', icon: <Globe className="w-5 h-5" /> },
+  { value: 'forex_sell', label: 'Forex Sell', icon: <RefreshCcw className="w-5 h-5" /> },
+  { value: 'loan_disbursement', label: 'Loan Disbursement', icon: <Banknote className="w-5 h-5" /> },
+  { value: 'loan_repayment', label: 'Loan Repayment', icon: <DollarSign className="w-5 h-5" /> },
+  { value: 'savings_deposit', label: 'Savings Deposit', icon: <PiggyBank className="w-5 h-5" /> },
+  { value: 'savings_withdrawal', label: 'Savings Withdrawal', icon: <PiggyBank className="w-5 h-5" /> },
+  { value: 'float_allocation', label: 'Float Allocation', icon: <Receipt className="w-5 h-5" /> },
 ];
 
+// Threshold above which a transaction needs sign-off purely on size, even if
+// it's domestic. Kept as a named constant so it's easy to make configurable
+// per-tenant later instead of hardcoded here.
+const LARGE_AMOUNT_APPROVAL_THRESHOLD = 1000;
+
+type RequiredRole = 'branch_manager' | 'compliance_officer';
+
+// Decides who has to sign off on a transaction before it can complete.
+// International transfers always route to compliance (AML / source-of-funds
+// obligations), regardless of amount. Everything else only needs approval
+// once it crosses the size threshold, and goes to the branch manager.
+function resolveRequiredRole(amount: number, isInternational: boolean): RequiredRole | null {
+  if (isInternational) return 'compliance_officer';
+  if (amount >= LARGE_AMOUNT_APPROVAL_THRESHOLD) return 'branch_manager';
+  return null;
+}
+
+function roleLabel(role: RequiredRole): string {
+  return role === 'compliance_officer' ? 'Compliance Officer' : 'Branch Manager';
+}
+
 interface TransactionsPageProps {
-  defaultType?: string;
+  defaultType?: Transaction['transaction_type'];
 }
 
 export function TransactionsPage({ defaultType }: TransactionsPageProps = {}) {
   const { tenant, branch, admin } = useAuth();
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [customers, setCustomers] = useState<Customer[]>([]);
-  const [wallets, setWallets] = useState<Wallet[]>([]);
+  const [, setWallets] = useState<Wallet[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
   const [filterType, setFilterType] = useState('all');
@@ -52,8 +74,23 @@ export function TransactionsPage({ defaultType }: TransactionsPageProps = {}) {
   const [showForm, setShowForm] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [formData, setFormData] = useState({
-    transaction_type: 'deposit',
+  const [formData, setFormData] = useState<{
+    transaction_type: Transaction['transaction_type'];
+    amount: number;
+    currency: string;
+    from_customer_id: string;
+    to_customer_id: string;
+    from_wallet_id: string;
+    to_wallet_id: string;
+    sender_name: string;
+    sender_phone: string;
+    receiver_name: string;
+    receiver_phone: string;
+    is_international: boolean;
+    purpose: string;
+    notes: string;
+  }>({
+    transaction_type: defaultType || 'deposit',
     amount: 0,
     currency: 'USD',
     from_customer_id: '',
@@ -132,32 +169,71 @@ export function TransactionsPage({ defaultType }: TransactionsPageProps = {}) {
       if (!tenant || !admin) throw new Error('Missing tenant or admin');
       if (formData.amount <= 0) throw new Error('Amount must be greater than 0');
 
-      const requiresApproval = formData.amount >= 1000 || formData.is_international;
+      const requiredRole = resolveRequiredRole(formData.amount, formData.is_international);
+      const requiresApproval = requiredRole !== null;
+      // Compliance sign-off (international) is treated as the higher tier;
+      // a plain large-amount branch-manager approval is level 1.
+      const approvalLevel = requiredRole === 'compliance_officer' ? 2 : requiresApproval ? 1 : 0;
 
-      const { error: insertError } = await supabase.from('transactions').insert({
-        tenant_id: tenant.id,
-        branch_id: branch?.id || null,
-        transaction_type: formData.transaction_type,
-        amount: formData.amount,
-        currency: formData.currency,
-        from_customer_id: formData.from_customer_id || null,
-        to_customer_id: formData.to_customer_id || null,
-        from_wallet_id: formData.from_wallet_id || null,
-        to_wallet_id: formData.to_wallet_id || null,
-        sender_name: formData.sender_name || null,
-        sender_phone: formData.sender_phone || null,
-        receiver_name: formData.receiver_name || null,
-        receiver_phone: formData.receiver_phone || null,
-        is_international: formData.is_international,
-        requires_compliance_check: formData.is_international,
-        purpose: formData.purpose || null,
-        notes: formData.notes || null,
-        status: requiresApproval ? 'pending' : 'approved',
-        created_by: admin.id,
-        required_approval_level: requiresApproval ? 2 : 1,
-      });
+      const { data: insertedTx, error: insertError } = await supabase
+        .from('transactions')
+        .insert({
+          tenant_id: tenant.id,
+          branch_id: branch?.id || null,
+          transaction_type: formData.transaction_type,
+          amount: formData.amount,
+          currency: formData.currency,
+          from_customer_id: formData.from_customer_id || null,
+          to_customer_id: formData.to_customer_id || null,
+          from_wallet_id: formData.from_wallet_id || null,
+          to_wallet_id: formData.to_wallet_id || null,
+          sender_name: formData.sender_name || null,
+          sender_phone: formData.sender_phone || null,
+          receiver_name: formData.receiver_name || null,
+          receiver_phone: formData.receiver_phone || null,
+          is_international: formData.is_international,
+          requires_compliance_check: formData.is_international,
+          purpose: formData.purpose || null,
+          notes: formData.notes || null,
+          status: (requiresApproval ? 'pending' : 'approved') as Transaction['status'],
+          created_by: admin.id,
+          required_approval_level: approvalLevel,
+        })
+        .select()
+        .single();
 
       if (insertError) throw insertError;
+
+      // Route the transaction to whoever actually has to sign off on it -
+      // without this, transactions sat as `status: 'pending'` with no
+      // corresponding approval record, so nothing showed up on the Pending
+      // Approvals page and nobody was ever notified.
+      if (requiresApproval && insertedTx && requiredRole) {
+        const { error: approvalError } = await supabase.from('transaction_approvals').insert({
+          tenant_id: tenant.id,
+          transaction_id: insertedTx.id,
+          required_role: requiredRole,
+          approval_level: approvalLevel,
+          status: 'pending' as const,
+        });
+        if (approvalError) throw approvalError;
+
+        // Best-effort notification - if the `notifications` table isn't set
+        // up yet this silently no-ops rather than blocking the transaction.
+        try {
+          await (supabase.from('notifications') as any).insert({
+            tenant_id: tenant.id,
+            branch_id: branch?.id || null,
+            admin_id: null, // tenant-wide; narrow to a specific admin_id once role->admin lookup exists
+            title: `${roleLabel(requiredRole)} approval needed`,
+            message: `${formData.transaction_type.replace(/_/g, ' ')} of ${formData.currency} ${formData.amount.toLocaleString()} is awaiting approval.`,
+            type: 'warning',
+            link_path: 'approvals',
+          });
+        } catch (notifyErr) {
+          console.error('Error creating approval notification:', notifyErr);
+        }
+      }
 
       await loadData();
       setShowForm(false);
@@ -171,7 +247,7 @@ export function TransactionsPage({ defaultType }: TransactionsPageProps = {}) {
 
   const resetForm = () => {
     setFormData({
-      transaction_type: 'deposit',
+      transaction_type: defaultType || 'deposit',
       amount: 0,
       currency: 'USD',
       from_customer_id: '',
@@ -192,23 +268,23 @@ export function TransactionsPage({ defaultType }: TransactionsPageProps = {}) {
   const getStatusBadge = (status: string) => {
     const styles: Record<string, { bg: string; text: string; icon: React.ReactNode }> = {
       pending: {
-        bg: 'bg-amber-100',
-        text: 'text-amber-700',
+        bg: 'bg-[#ee7b22]/10',
+        text: 'text-[#ee7b22]',
         icon: <Clock className="w-3.5 h-3.5" />,
       },
       approved: {
-        bg: 'bg-blue-100',
-        text: 'text-blue-700',
+        bg: 'bg-[#1ebcb2]/10',
+        text: 'text-[#1ebcb2]',
         icon: <CheckCircle className="w-3.5 h-3.5" />,
       },
       completed: {
-        bg: 'bg-green-100',
-        text: 'text-green-700',
+        bg: 'bg-[#1ebcb2]/10',
+        text: 'text-[#1ebcb2]',
         icon: <CheckCircle className="w-3.5 h-3.5" />,
       },
       failed: {
-        bg: 'bg-red-100',
-        text: 'text-red-700',
+        bg: 'bg-[#c46040]/10',
+        text: 'text-[#c46040]',
         icon: <XCircle className="w-3.5 h-3.5" />,
       },
       reversed: {
@@ -228,15 +304,22 @@ export function TransactionsPage({ defaultType }: TransactionsPageProps = {}) {
 
   const getTransactionIcon = (type: string) => {
     if (type.includes('deposit') || type.includes('repayment')) {
-      return <ArrowDownRight className="w-5 h-5 text-green-600" />;
+      return <ArrowDownRight className="w-5 h-5 text-[#1ebcb2]" />;
     }
     if (type.includes('withdrawal') || type.includes('disbursement')) {
-      return <ArrowUpRight className="w-5 h-5 text-amber-600" />;
+      return <ArrowUpRight className="w-5 h-5 text-[#ee7b22]" />;
     }
     if (type.includes('forex')) {
-      return <Globe className="w-5 h-5 text-purple-600" />;
+      return <Globe className="w-5 h-5 text-[#641f60]" />;
     }
-    return <ArrowRightLeft className="w-5 h-5 text-blue-600" />;
+    return <ArrowRightLeft className="w-5 h-5 text-slate-500" />;
+  };
+
+  const getIconBg = (type: string) => {
+    if (type.includes('deposit') || type.includes('repayment')) return 'bg-[#1ebcb2]/10';
+    if (type.includes('withdrawal') || type.includes('disbursement')) return 'bg-[#ee7b22]/10';
+    if (type.includes('forex')) return 'bg-[#641f60]/10';
+    return 'bg-slate-100';
   };
 
   return (
@@ -244,7 +327,7 @@ export function TransactionsPage({ defaultType }: TransactionsPageProps = {}) {
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-slate-900">Transactions</h1>
+          <h1 className="text-2xl font-bold text-[#641f60]">Transactions</h1>
           <p className="text-slate-600 mt-1">Process deposits, withdrawals, transfers, and more</p>
         </div>
         <button
@@ -252,7 +335,7 @@ export function TransactionsPage({ defaultType }: TransactionsPageProps = {}) {
             resetForm();
             setShowForm(true);
           }}
-          className="inline-flex items-center gap-2 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-lg shadow-lg hover:shadow-xl transition-all"
+          className="inline-flex items-center gap-2 px-4 py-2.5 bg-[#ee7b22] hover:bg-[#c46040] text-white font-medium rounded-lg shadow-lg transition-all"
         >
           <Plus className="w-5 h-5" />
           New Transaction
@@ -269,26 +352,26 @@ export function TransactionsPage({ defaultType }: TransactionsPageProps = {}) {
               value={searchQuery}
               onChange={e => setSearchQuery(e.target.value)}
               placeholder="Search by reference or name..."
-              className="w-full pl-10 pr-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+              className="w-full pl-10 pr-4 py-2.5 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#1ebcb2] focus:border-transparent"
             />
           </div>
           <div className="flex items-center gap-3">
             <select
               value={filterType}
               onChange={e => setFilterType(e.target.value)}
-              className="px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+              className="px-4 py-2.5 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#1ebcb2] focus:border-transparent"
             >
               <option value="all">All Types</option>
               {TRANSACTION_TYPES.map(t => (
                 <option key={t.value} value={t.value}>
-                  {t.icon} {t.label}
+                  {t.label}
                 </option>
               ))}
             </select>
             <select
               value={filterStatus}
               onChange={e => setFilterStatus(e.target.value)}
-              className="px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+              className="px-4 py-2.5 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#1ebcb2] focus:border-transparent"
             >
               <option value="all">All Status</option>
               <option value="pending">Pending</option>
@@ -304,24 +387,14 @@ export function TransactionsPage({ defaultType }: TransactionsPageProps = {}) {
       <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
         {loading ? (
           <div className="flex items-center justify-center py-12">
-            <Loader2 className="w-8 h-8 animate-spin text-blue-600" />
+            <Loader2 className="w-8 h-8 animate-spin text-[#641f60]" />
           </div>
         ) : filteredTransactions.length > 0 ? (
           <div className="divide-y divide-slate-100">
             {filteredTransactions.map(tx => (
               <div key={tx.id} className="px-6 py-4 hover:bg-slate-50 transition-colors">
                 <div className="flex items-center gap-4">
-                  <div
-                    className={`w-12 h-12 rounded-xl flex items-center justify-center ${
-                      tx.transaction_type.includes('deposit') || tx.transaction_type.includes('repayment')
-                        ? 'bg-green-100'
-                        : tx.transaction_type.includes('withdrawal') || tx.transaction_type.includes('disbursement')
-                        ? 'bg-amber-100'
-                        : tx.transaction_type.includes('forex')
-                        ? 'bg-purple-100'
-                        : 'bg-blue-100'
-                    }`}
-                  >
+                  <div className={`w-12 h-12 rounded-xl flex items-center justify-center ${getIconBg(tx.transaction_type)}`}>
                     {getTransactionIcon(tx.transaction_type)}
                   </div>
                   <div className="flex-1 min-w-0">
@@ -334,7 +407,7 @@ export function TransactionsPage({ defaultType }: TransactionsPageProps = {}) {
                       </div>
                       <div className="flex items-center gap-3">
                         {tx.is_international && (
-                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs bg-purple-50 text-purple-700">
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs bg-[#641f60]/10 text-[#641f60]">
                             <Globe className="w-3 h-3" />
                             International
                           </span>
@@ -347,7 +420,7 @@ export function TransactionsPage({ defaultType }: TransactionsPageProps = {}) {
                         <span className="flex items-center gap-1">
                           <User className="w-4 h-4" />
                           {tx.sender_name && `From: ${tx.sender_name}`}
-                          {tx.sender_name && tx.receiver_name && ' → '}
+                          {tx.sender_name && tx.receiver_name && ' \u2192 '}
                           {tx.receiver_name && `To: ${tx.receiver_name}`}
                         </span>
                       )}
@@ -357,7 +430,7 @@ export function TransactionsPage({ defaultType }: TransactionsPageProps = {}) {
                     <p
                       className={`text-lg font-semibold ${
                         tx.transaction_type.includes('deposit') || tx.transaction_type.includes('repayment')
-                          ? 'text-green-600'
+                          ? 'text-[#1ebcb2]'
                           : 'text-slate-900'
                       }`}
                     >
@@ -392,7 +465,7 @@ export function TransactionsPage({ defaultType }: TransactionsPageProps = {}) {
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 overflow-y-auto">
           <div className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full my-8">
             <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between sticky top-0 bg-white z-10">
-              <h2 className="text-xl font-bold text-slate-900">New Transaction</h2>
+              <h2 className="text-xl font-bold text-[#641f60]">New Transaction</h2>
               <button
                 onClick={() => setShowForm(false)}
                 className="p-2 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100"
@@ -415,11 +488,13 @@ export function TransactionsPage({ defaultType }: TransactionsPageProps = {}) {
                       onClick={() => setFormData(prev => ({ ...prev, transaction_type: t.value }))}
                       className={`p-3 rounded-lg border-2 text-left transition-all ${
                         formData.transaction_type === t.value
-                          ? 'border-blue-600 bg-blue-50'
+                          ? 'border-[#1ebcb2] bg-[#1ebcb2]/10'
                           : 'border-slate-200 hover:border-slate-300'
                       }`}
                     >
-                      <span className="text-xl">{t.icon}</span>
+                      <span className={formData.transaction_type === t.value ? 'text-[#641f60]' : 'text-slate-500'}>
+                        {t.icon}
+                      </span>
                       <span className="block text-sm font-medium text-slate-700 mt-1">{t.label}</span>
                     </button>
                   ))}
@@ -441,12 +516,17 @@ export function TransactionsPage({ defaultType }: TransactionsPageProps = {}) {
                       required
                       value={formData.amount || ''}
                       onChange={e => setFormData(prev => ({ ...prev, amount: parseFloat(e.target.value) || 0 }))}
-                      className="w-full pl-10 pr-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                      className="w-full pl-10 pr-4 py-2.5 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#1ebcb2] focus:border-transparent"
                     />
                   </div>
-                  {formData.amount >= 1000 && (
-                    <p className="text-xs text-amber-600 mt-1">
-                      Transaction requires approval (amount {">="} $1,000)
+                  {formData.amount >= LARGE_AMOUNT_APPROVAL_THRESHOLD && (
+                    <p className="text-xs text-[#ee7b22] mt-1">
+                      Requires Branch Manager approval (amount {'>='} {LARGE_AMOUNT_APPROVAL_THRESHOLD.toLocaleString()})
+                    </p>
+                  )}
+                  {formData.is_international && (
+                    <p className="text-xs text-[#ee7b22] mt-1">
+                      Requires Compliance Officer approval (international transfer)
                     </p>
                   )}
                 </div>
@@ -457,7 +537,7 @@ export function TransactionsPage({ defaultType }: TransactionsPageProps = {}) {
                   <select
                     value={formData.currency}
                     onChange={e => setFormData(prev => ({ ...prev, currency: e.target.value }))}
-                    className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                    className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#1ebcb2] focus:border-transparent"
                   >
                     <option value="USD">USD</option>
                     <option value="KES">KES</option>
@@ -476,7 +556,7 @@ export function TransactionsPage({ defaultType }: TransactionsPageProps = {}) {
                   <select
                     value={formData.from_customer_id}
                     onChange={e => setFormData(prev => ({ ...prev, from_customer_id: e.target.value }))}
-                    className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                    className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#1ebcb2] focus:border-transparent"
                   >
                     <option value="">Select customer</option>
                     {customers.map(c => (
@@ -493,7 +573,7 @@ export function TransactionsPage({ defaultType }: TransactionsPageProps = {}) {
                   <select
                     value={formData.to_customer_id}
                     onChange={e => setFormData(prev => ({ ...prev, to_customer_id: e.target.value }))}
-                    className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                    className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#1ebcb2] focus:border-transparent"
                   >
                     <option value="">Select customer</option>
                     {customers.map(c => (
@@ -509,7 +589,7 @@ export function TransactionsPage({ defaultType }: TransactionsPageProps = {}) {
               {(formData.transaction_type === 'transfer' || formData.transaction_type === 'withdrawal') && (
                 <div className="border-t border-slate-200 pt-4 space-y-4">
                   <h3 className="font-semibold text-slate-900 flex items-center gap-2">
-                    <User className="w-5 h-5 text-blue-600" />
+                    <User className="w-5 h-5 text-[#641f60]" />
                     External Party (Optional)
                   </h3>
                   <div className="grid sm:grid-cols-2 gap-4">
@@ -521,7 +601,7 @@ export function TransactionsPage({ defaultType }: TransactionsPageProps = {}) {
                         type="text"
                         value={formData.sender_name}
                         onChange={e => setFormData(prev => ({ ...prev, sender_name: e.target.value }))}
-                        className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                        className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#1ebcb2] focus:border-transparent"
                       />
                     </div>
                     <div>
@@ -534,7 +614,7 @@ export function TransactionsPage({ defaultType }: TransactionsPageProps = {}) {
                           type="tel"
                           value={formData.sender_phone}
                           onChange={e => setFormData(prev => ({ ...prev, sender_phone: e.target.value }))}
-                          className="w-full pl-10 pr-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                          className="w-full pl-10 pr-4 py-2.5 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#1ebcb2] focus:border-transparent"
                         />
                       </div>
                     </div>
@@ -548,7 +628,7 @@ export function TransactionsPage({ defaultType }: TransactionsPageProps = {}) {
                         type="text"
                         value={formData.receiver_name}
                         onChange={e => setFormData(prev => ({ ...prev, receiver_name: e.target.value }))}
-                        className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                        className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#1ebcb2] focus:border-transparent"
                       />
                     </div>
                     <div>
@@ -561,7 +641,7 @@ export function TransactionsPage({ defaultType }: TransactionsPageProps = {}) {
                           type="tel"
                           value={formData.receiver_phone}
                           onChange={e => setFormData(prev => ({ ...prev, receiver_phone: e.target.value }))}
-                          className="w-full pl-10 pr-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                          className="w-full pl-10 pr-4 py-2.5 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#1ebcb2] focus:border-transparent"
                         />
                       </div>
                     </div>
@@ -576,7 +656,7 @@ export function TransactionsPage({ defaultType }: TransactionsPageProps = {}) {
                   id="is_international"
                   checked={formData.is_international}
                   onChange={e => setFormData(prev => ({ ...prev, is_international: e.target.checked }))}
-                  className="w-4 h-4 text-blue-600 border-slate-300 rounded focus:ring-blue-500"
+                  className="w-4 h-4 text-[#641f60] border-slate-300 rounded focus:ring-[#1ebcb2]"
                 />
                 <label htmlFor="is_international" className="text-sm text-slate-700">
                   This is an international transfer (requires compliance check)
@@ -590,13 +670,13 @@ export function TransactionsPage({ defaultType }: TransactionsPageProps = {}) {
                   value={formData.notes}
                   onChange={e => setFormData(prev => ({ ...prev, notes: e.target.value }))}
                   rows={2}
-                  className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#1ebcb2] focus:border-transparent"
                   placeholder="Add any additional notes..."
                 />
               </div>
 
               {error && (
-                <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm flex items-center gap-2">
+                <div className="p-3 bg-[#c46040]/10 border border-[#c46040]/30 rounded-lg text-[#c46040] text-sm flex items-center gap-2">
                   <AlertCircle className="w-5 h-5 flex-shrink-0" />
                   {error}
                 </div>
@@ -614,7 +694,7 @@ export function TransactionsPage({ defaultType }: TransactionsPageProps = {}) {
                 <button
                   type="submit"
                   disabled={submitting}
-                  className="px-6 py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-lg shadow-lg disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                  className="px-6 py-2.5 bg-[#ee7b22] hover:bg-[#c46040] text-white font-medium rounded-lg shadow-lg disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
                 >
                   {submitting ? (
                     <>
