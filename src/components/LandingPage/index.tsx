@@ -19,7 +19,10 @@ export function LandingPage() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
   return (
-    <div className="min-h-screen bg-white">
+    // overflow-x-clip on the page root guarantees no section can cause a
+    // horizontal scrollbar, even if a child's decoration extends past the
+    // viewport. w-full + max-w-full keep the container itself bounded.
+    <div className="min-h-screen w-full max-w-full overflow-x-clip bg-white">
       <Navbar onNavigate={navigate} onOpenMobileMenu={() => setMobileMenuOpen(true)} />
       <MobileMenu open={mobileMenuOpen} onClose={() => setMobileMenuOpen(false)} onNavigate={navigate} />
       <Hero onNavigate={navigate} />

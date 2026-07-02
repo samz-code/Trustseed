@@ -27,15 +27,16 @@ export function Navbar({ onNavigate, onOpenMobileMenu }: NavbarProps) {
   return (
     <nav className="sticky top-0 left-0 right-0 z-50 bg-white shadow-lg">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        <div className="flex items-center justify-between h-24">
+        <div className="flex items-center justify-between h-16 sm:h-20 md:h-24 gap-2">
           <button
             onClick={() => onNavigate('/')}
-            className="flex items-center gap-3 rounded-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-[#641f60] focus-visible:ring-offset-2"
+            className="flex items-center gap-3 rounded-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-[#641f60] focus-visible:ring-offset-2 shrink-0"
             aria-label="Go to homepage"
           >
-            <img src="/logo-bg.png" alt="Trust Seed" className="h-16 w-auto object-contain" />
+            <img src="/logo-bg.png" alt="Trust Seed" className="h-10 sm:h-12 md:h-16 w-auto object-contain" />
           </button>
 
+          {/* Desktop nav links */}
           <div className="hidden md:flex items-center gap-8">
             <a
               href="/#who-we-are"
@@ -67,7 +68,8 @@ export function Navbar({ onNavigate, onOpenMobileMenu }: NavbarProps) {
             </a>
           </div>
 
-          <div className="hidden md:flex items-center gap-3">
+          {/* Desktop actions */}
+          <div className="hidden md:flex items-center gap-3 shrink-0">
             <button
               onClick={() => onNavigate('/auth')}
               className="flex items-center gap-2 px-4 py-2.5 text-[#641f60] font-medium border-2 border-slate-200 rounded-lg hover:border-[#641f60] hover:bg-[#641f60]/5 transition-all"
@@ -84,12 +86,24 @@ export function Navbar({ onNavigate, onOpenMobileMenu }: NavbarProps) {
             </button>
           </div>
 
-          <button
-            onClick={onOpenMobileMenu}
-            className="md:hidden p-2 rounded-lg text-slate-600 hover:bg-slate-100"
-          >
-            <Menu className="w-6 h-6" />
-          </button>
+          {/* Mobile actions: Sign In stays visible, everything else lives in the menu */}
+          <div className="flex md:hidden items-center gap-2 shrink-0">
+            <button
+              onClick={() => onNavigate('/auth')}
+              aria-label="Sign in"
+              className="flex items-center gap-1.5 px-3 py-2 text-[#641f60] font-medium text-sm border-2 border-slate-200 rounded-lg hover:border-[#641f60] hover:bg-[#641f60]/5 transition-all whitespace-nowrap"
+            >
+              <LogIn className="w-4 h-4 shrink-0" />
+              <span>Sign In</span>
+            </button>
+            <button
+              onClick={onOpenMobileMenu}
+              aria-label="Open menu"
+              className="p-2 rounded-lg text-slate-600 hover:bg-slate-100 shrink-0"
+            >
+              <Menu className="w-6 h-6" />
+            </button>
+          </div>
         </div>
       </div>
     </nav>

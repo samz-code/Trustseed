@@ -40,6 +40,8 @@
 
   html {
     scroll-behavior: smooth;
+    max-width: 100%;
+    overflow-x: hidden;
   }
 
   body {
@@ -48,6 +50,15 @@
     -moz-osx-font-smoothing: grayscale;
     line-height: 1.5;
     color-scheme: light;
+    max-width: 100%;
+    overflow-x: hidden;
+    width: 100%;
+    position: relative;
+  }
+
+  #root {
+    max-width: 100%;
+    overflow-x: hidden;
   }
 
   button {

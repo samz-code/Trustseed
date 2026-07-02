@@ -72,7 +72,7 @@ export function Hero({ onNavigate }: HeroProps) {
   }, []);
 
   return (
-    <section className="relative min-h-screen flex items-center overflow-hidden">
+    <section className="relative min-h-screen flex items-center overflow-hidden pb-4 sm:pb-0">
       <div className="absolute inset-0 bg-[#dae1e1]/20" />
 
       {/* Ambient background blur blobs */}
@@ -89,41 +89,43 @@ export function Hero({ onNavigate }: HeroProps) {
         }}
       />
 
-      <div className="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-12 sm:py-20 w-full min-w-0">
-        <div className="grid lg:grid-cols-2 gap-12 items-center min-w-0">
+      <div className="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-10 sm:py-20 w-full min-w-0">
+        <div className="grid lg:grid-cols-2 gap-10 lg:gap-12 items-center min-w-0">
 
           {/* Left Text Column */}
           <div
-            className={`min-w-0 space-y-8 transition-all duration-700 ease-out motion-reduce:transition-none motion-reduce:!translate-y-0 motion-reduce:!opacity-100 ${
+            className={`min-w-0 space-y-6 sm:space-y-8 transition-all duration-700 ease-out motion-reduce:transition-none motion-reduce:!translate-y-0 motion-reduce:!opacity-100 ${
               mounted ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-6'
             }`}
           >
-            <div className="inline-flex items-center gap-2 px-4 py-2 bg-[#641f60]/10 rounded-full">
-              <span className="w-2 h-2 bg-[#1ebcb2] rounded-full animate-pulse" />
-              <span className="text-[#641f60] font-medium text-sm">Trusted by 50+ Financial Institutions</span>
+            <div className="inline-flex items-center gap-2 px-3 py-1.5 sm:px-4 sm:py-2 bg-[#641f60]/10 rounded-full max-w-full">
+              <span className="w-2 h-2 shrink-0 bg-[#1ebcb2] rounded-full animate-pulse" />
+              <span className="text-[#641f60] font-medium text-xs sm:text-sm whitespace-normal break-words">
+                Trusted by 50+ Financial Institutions
+              </span>
             </div>
 
-            <h1 className="text-4xl md:text-5xl lg:text-6xl font-bold text-slate-900 leading-tight">
+            <h1 className="text-3xl sm:text-4xl md:text-5xl lg:text-6xl font-bold text-slate-900 leading-tight break-words">
               Empowering <span className="text-[#ee7b22]">Microfinance</span> Across Africa
             </h1>
 
-            <p className="text-lg text-slate-600 max-w-xl">
+            <p className="text-base sm:text-lg text-slate-600 max-w-xl">
               A complete enterprise financial platform designed for microfinance institutions, SACCOs, credit unions,
               and money transfer operators. Manage customers, loans, savings, transfers, and accounting in one
               integrated system.
             </p>
 
-            <div className="flex flex-col sm:flex-row gap-4">
+            <div className="flex flex-col sm:flex-row gap-3 sm:gap-4">
               <button
                 onClick={() => onNavigate('/auth')}
-                className="px-8 py-4 bg-[#ee7b22] text-white font-semibold rounded-xl shadow-xl hover:bg-[#c46040] transition-all flex items-center justify-center gap-2 text-lg"
+                className="w-full sm:w-auto px-6 py-3 sm:px-8 sm:py-4 bg-[#ee7b22] text-white font-semibold rounded-xl shadow-xl hover:bg-[#c46040] transition-all flex items-center justify-center gap-2 text-base sm:text-lg"
               >
                 Start Free Trial
-                <ArrowRight className="w-5 h-5" />
+                <ArrowRight className="w-5 h-5 shrink-0" />
               </button>
               <button
                 onClick={() => onNavigate('/auth')}
-                className="px-8 py-4 border-2 border-[#641f60] text-[#641f60] font-semibold rounded-xl hover:bg-[#641f60]/5 transition-all flex items-center justify-center gap-2 text-lg"
+                className="w-full sm:w-auto px-6 py-3 sm:px-8 sm:py-4 border-2 border-[#641f60] text-[#641f60] font-semibold rounded-xl hover:bg-[#641f60]/5 transition-all flex items-center justify-center gap-2 text-base sm:text-lg"
               >
                 Watch Demo
               </button>
@@ -132,12 +134,12 @@ export function Hero({ onNavigate }: HeroProps) {
 
           {/* Right Column: Clean Map Showcase + Smooth Flag Ticker Row Below */}
           <div
-            className={`min-w-0 flex flex-col items-center justify-center gap-8 transition-all duration-700 ease-out delay-150 motion-reduce:transition-none motion-reduce:!translate-y-0 motion-reduce:!opacity-100 ${
+            className={`min-w-0 flex flex-col items-center justify-center gap-6 sm:gap-8 transition-all duration-700 ease-out delay-150 motion-reduce:transition-none motion-reduce:!translate-y-0 motion-reduce:!opacity-100 ${
               mounted ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-6'
             }`}
           >
             {/* The Rotating Map Graphic */}
-            <div className="w-full max-w-[380px] aspect-square flex items-center justify-center overflow-hidden rounded-full bg-transparent">
+            <div className="w-full max-w-[220px] sm:max-w-[320px] md:max-w-[380px] aspect-square flex items-center justify-center overflow-hidden rounded-full bg-transparent">
               <img
                 src="/map.png"
                 alt="Africa Map Representation"
@@ -146,22 +148,22 @@ export function Hero({ onNavigate }: HeroProps) {
             </div>
 
             {/* Premium Fading Marquee Row Container */}
-            <div className="w-full max-w-[420px] min-w-0 relative mt-2">
+            <div className="w-full max-w-[320px] sm:max-w-[420px] min-w-0 relative mt-2">
               {/* Subtle edge masks to give a premium right-to-left fading appearance */}
-              <div className="absolute inset-y-0 left-0 w-12 bg-gradient-to-r from-[#eff2f2] to-transparent z-10 pointer-events-none" />
-              <div className="absolute inset-y-0 right-0 w-12 bg-gradient-to-l from-[#eff2f2] to-transparent z-10 pointer-events-none" />
+              <div className="absolute inset-y-0 left-0 w-8 sm:w-12 bg-gradient-to-r from-[#eff2f2] to-transparent z-10 pointer-events-none" />
+              <div className="absolute inset-y-0 right-0 w-8 sm:w-12 bg-gradient-to-l from-[#eff2f2] to-transparent z-10 pointer-events-none" />
 
               <div className="w-full min-w-0 overflow-hidden flex whitespace-nowrap py-2">
                 {/* Track Group 1 */}
                 <div className="flex gap-6 items-center shrink-0 animate-[tickerMarquee_70s_linear_infinite]">
                   {ALL_AFRICA_FLAGS.map((flag, idx) => (
-                    <div key={`g1-${flag.code}-${idx}`} className="flex items-center gap-2 bg-white/60 border border-slate-200/80 rounded-lg pl-1.5 pr-2.5 py-1 shadow-sm">
+                    <div key={`g1-${flag.code}-${idx}`} className="flex items-center gap-2 bg-white/60 border border-slate-200/80 rounded-lg pl-1.5 pr-2.5 py-1 shadow-sm shrink-0">
                       <img
                         src={`https://flagcdn.com/w40/${flag.code}.png`}
                         alt={flag.name}
-                        className="w-6 h-4 rounded object-cover"
+                        className="w-6 h-4 rounded object-cover shrink-0"
                       />
-                      <span className="text-xs font-semibold text-slate-700">{flag.name}</span>
+                      <span className="text-xs font-semibold text-slate-700 whitespace-nowrap">{flag.name}</span>
                     </div>
                   ))}
                 </div>
@@ -169,13 +171,13 @@ export function Hero({ onNavigate }: HeroProps) {
                 {/* Duplicated Track Group 2 to build a flawless infinite loop illusion */}
                 <div className="flex gap-6 items-center shrink-0 animate-[tickerMarquee_70s_linear_infinite]" aria-hidden="true">
                   {ALL_AFRICA_FLAGS.map((flag, idx) => (
-                    <div key={`g2-${flag.code}-${idx}`} className="flex items-center gap-2 bg-white/60 border border-slate-200/80 rounded-lg pl-1.5 pr-2.5 py-1 shadow-sm">
+                    <div key={`g2-${flag.code}-${idx}`} className="flex items-center gap-2 bg-white/60 border border-slate-200/80 rounded-lg pl-1.5 pr-2.5 py-1 shadow-sm shrink-0">
                       <img
                         src={`https://flagcdn.com/w40/${flag.code}.png`}
                         alt={flag.name}
-                        className="w-6 h-4 rounded object-cover"
+                        className="w-6 h-4 rounded object-cover shrink-0"
                       />
-                      <span className="text-xs font-semibold text-slate-700">{flag.name}</span>
+                      <span className="text-xs font-semibold text-slate-700 whitespace-nowrap">{flag.name}</span>
                     </div>
                   ))}
                 </div>
@@ -187,12 +189,16 @@ export function Hero({ onNavigate }: HeroProps) {
         </div>
       </div>
 
-      {/* Bottom Scroll Indicator Arrow */}
+      {/* Bottom Scroll Indicator Arrow — desktop/tablet only. On mobile the
+          hero content is taller than one viewport, so an absolutely
+          positioned "bottom of section" indicator lands mid-content
+          (overlapping the flag ticker) instead of at the true screen
+          bottom. Hiding it below sm: avoids that collision entirely. */}
       <button
         type="button"
         aria-label="Scroll down"
         onClick={() => window.scrollTo({ top: window.innerHeight, behavior: 'smooth' })}
-        className="group absolute bottom-8 left-1/2 -translate-x-1/2 flex flex-col items-center gap-2 text-slate-400 hover:text-[#641f60] transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-[#641f60] focus-visible:ring-offset-2 rounded-full"
+        className="group absolute bottom-8 left-1/2 -translate-x-1/2 hidden sm:flex flex-col items-center gap-2 text-slate-400 hover:text-[#641f60] transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-[#641f60] focus-visible:ring-offset-2 rounded-full"
       >
         <span className="text-xs font-medium tracking-wide uppercase opacity-70 group-hover:opacity-100 transition-opacity">
           Scroll
