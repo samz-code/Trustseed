@@ -94,7 +94,16 @@ export function Footer() {
           <p className="text-sm text-slate-400">
             &copy; {new Date().getFullYear()} Trust Seed Microfinance Enterprises. All rights reserved.
           </p>
-          
+          <div className="flex items-center gap-4">
+            <a
+              href="https://www.emonisamuel.co.ke"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-sm text-[#1ebcb2] hover:text-white transition-colors"
+            >
+              Developed by Emoni Samuel
+            </a>
+          </div>
         </div>
       </div>
     </footer>
