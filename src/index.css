@@ -1,0 +1,387 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* Brand Colors */
+    --brand-orange: #ee7b22;
+    --brand-teal: #1ebcb2;
+    --brand-purple: #641f60;
+    --brand-gray: #dae1e1;
+    --brand-mint: #7eccc6;
+    --brand-rust: #c46040;
+
+    --background: 0 0% 100%;
+    --foreground: 222.2 84% 4.9%;
+    --card: 0 0% 100%;
+    --card-foreground: 222.2 84% 4.9%;
+    --primary: 25 89% 53%;
+    --primary-foreground: 210 40% 98%;
+    --secondary: 210 40% 96.1%;
+    --secondary-foreground: 222.2 47.4% 11.2%;
+    --muted: 210 40% 96.1%;
+    --muted-foreground: 215.4 16.3% 46.9%;
+    --accent: 210 40% 96.1%;
+    --accent-foreground: 222.2 47.4% 11.2%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 214.3 31.8% 91.4%;
+    --input: 214.3 31.8% 91.4%;
+    --ring: 25 89% 53%;
+    --radius: 0.5rem;
+  }
+
+  * {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+  }
+
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    line-height: 1.5;
+    color-scheme: light;
+  }
+
+  button {
+    cursor: pointer;
+  }
+
+  input, textarea, select {
+    outline: none;
+  }
+
+  /* Ensure typed/selected values are always dark and visible, regardless of
+     inherited color. Any field that wants different text color can still
+     override with a Tailwind text-* class (higher specificity via class). */
+  input,
+  textarea,
+  select {
+    color: #0f172a; /* slate-900 */
+  }
+
+  input::placeholder,
+  textarea::placeholder {
+    color: #94a3b8; /* slate-400 */
+    opacity: 1; /* Firefox lowers placeholder opacity by default */
+  }
+
+  /* Dropdown option text (some browsers render dark-on-dark otherwise) */
+  select option {
+    color: #0f172a;
+    background-color: #ffffff;
+  }
+
+  a {
+    text-decoration: none;
+    color: inherit;
+  }
+
+  img, video {
+    max-width: 100%;
+    height: auto;
+  }
+
+  table {
+    border-collapse: collapse;
+    width: 100%;
+  }
+
+  th, td {
+    text-align: left;
+    padding: 0.5rem 1rem;
+  }
+}
+
+@layer components {
+  .input-field {
+    @apply w-full px-4 py-2.5 border border-slate-300 rounded-lg text-slate-900 placeholder-slate-400;
+    @apply focus:ring-2 focus:ring-[#1ebcb2] focus:border-[#1ebcb2];
+    @apply disabled:opacity-50 disabled:cursor-not-allowed;
+    @apply transition-all duration-200;
+  }
+
+  .btn {
+    @apply inline-flex items-center justify-center gap-2;
+    @apply font-medium rounded-lg transition-all duration-200;
+    @apply disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+
+  .btn-primary {
+    @apply bg-gradient-to-r from-[#ee7b22] to-[#c46040] text-white;
+    @apply shadow-lg hover:shadow-xl;
+  }
+
+  .btn-secondary {
+    @apply border border-[#dae1e1] text-slate-700;
+    @apply hover:bg-slate-50;
+  }
+
+  .btn-danger {
+    @apply bg-[#c46040] hover:bg-red-700 text-white;
+  }
+
+  .card {
+    @apply bg-white rounded-xl border border-[#dae1e1];
+    @apply shadow-sm;
+  }
+
+  .card-hover {
+    @apply hover:shadow-lg hover:border-[#7eccc6];
+    @apply transition-all duration-200;
+  }
+
+  .label {
+    @apply block text-sm font-medium text-slate-700 mb-1;
+  }
+
+  .badge {
+    @apply inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium;
+  }
+
+  .badge-success {
+    @apply bg-green-100 text-green-700;
+  }
+
+  .badge-warning {
+    @apply bg-amber-100 text-amber-700;
+  }
+
+  .badge-error {
+    @apply bg-red-100 text-red-700;
+  }
+
+  .badge-info {
+    @apply bg-[#1ebcb2]/10 text-[#1ebcb2];
+  }
+
+  .skeleton {
+    @apply animate-pulse bg-slate-200 rounded;
+  }
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+
+  .no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: #cbd5e1 transparent;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background-color: #cbd5e1;
+    border-radius: 3px;
+  }
+
+  .gradient-border {
+    background: linear-gradient(white, white) padding-box,
+      linear-gradient(135deg, #ee7b22, #c46040) border-box;
+    border: 2px solid transparent;
+  }
+
+  .glass {
+    background: rgba(255, 255, 255, 0.1);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+  }
+
+  .brand-gradient {
+    background: linear-gradient(135deg, #ee7b22, #c46040);
+  }
+
+  .brand-gradient-teal {
+    background: linear-gradient(135deg, #1ebcb2, #7eccc6);
+  }
+
+  .brand-gradient-purple {
+    background: linear-gradient(135deg, #641f60, #ee7b22);
+  }
+}
+
+/* Custom scrollbar for dark backgrounds */
+.scrollbar-dark {
+  scrollbar-color: rgba(255, 255, 255, 0.2) transparent;
+}
+
+.scrollbar-dark::-webkit-scrollbar-thumb {
+  background-color: rgba(255, 255, 255, 0.2);
+}
+
+/* Form input focus states */
+input:focus,
+textarea:focus,
+select:focus {
+  outline: none;
+}
+
+/* Keep autofilled values dark and readable (Chrome/Brave/Edge force their own
+   colors on autofill, which is the usual cause of "invisible until I retype"
+   text on login and customer forms). */
+input:-webkit-autofill,
+input:-webkit-autofill:hover,
+input:-webkit-autofill:focus,
+input:-webkit-autofill:active,
+textarea:-webkit-autofill,
+textarea:-webkit-autofill:hover,
+textarea:-webkit-autofill:focus,
+select:-webkit-autofill {
+  -webkit-text-fill-color: #0f172a !important;
+  caret-color: #0f172a;
+  -webkit-box-shadow: 0 0 0px 1000px #ffffff inset !important;
+  box-shadow: 0 0 0px 1000px #ffffff inset !important;
+  transition: background-color 5000s ease-in-out 0s;
+}
+
+/* Transition for all interactive elements */
+button,
+a,
+input,
+select,
+textarea {
+  transition-property: color, background-color, border-color, box-shadow, transform, opacity;
+  transition-duration: 150ms;
+  transition-timing-function: ease-out;
+}
+
+/* Loading spinner customization */
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.animate-spin {
+  animation: spin 1s linear infinite;
+}
+
+/* Pulse animation for status indicators */
+@keyframes pulse-subtle {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.6;
+  }
+}
+
+.animate-pulse-subtle {
+  animation: pulse-subtle 2s ease-in-out infinite;
+}
+
+/* Fade in animation */
+@keyframes fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-in {
+  animation: fade-in 0.3s ease-out forwards;
+}
+
+/* Slide in from right */
+@keyframes slide-in-right {
+  from {
+    transform: translateX(100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+
+.animate-slide-in-right {
+  animation: slide-in-right 0.3s ease-out forwards;
+}
+
+/* Brand color utilities */
+.text-brand-orange { color: #ee7b22; }
+.text-brand-teal { color: #1ebcb2; }
+.text-brand-purple { color: #641f60; }
+.text-brand-rust { color: #c46040; }
+.text-brand-mint { color: #7eccc6; }
+
+.bg-brand-orange { background-color: #ee7b22; }
+.bg-brand-teal { background-color: #1ebcb2; }
+.bg-brand-purple { background-color: #641f60; }
+.bg-brand-rust { background-color: #c46040; }
+.bg-brand-mint { background-color: #7eccc6; }
+.bg-brand-gray { background-color: #dae1e1; }
+
+.border-brand-orange { border-color: #ee7b22; }
+.border-brand-teal { border-color: #1ebcb2; }
+.border-brand-purple { border-color: #641f60; }
+.border-brand-rust { border-color: #c46040; }
+.border-brand-mint { border-color: #7eccc6; }
+.border-brand-gray { border-color: #dae1e1; }
+/* ============================================================
+   Trust Seed brand variables
+   Defaults match the built-in palette. AuthContext overrides
+   these at runtime from tenant.settings.branding via applyBranding().
+   Use these anywhere you want the tenant's chosen colors to apply,
+   e.g. style={{ backgroundColor: 'var(--brand-primary)' }} or a
+   utility class below.
+   ============================================================ */
+:root {
+  --brand-primary: #641f60;
+  --brand-primary-dark: #4a1646;
+  --brand-primary-light: #e8dbe7;
+  --brand-primary-text: #ffffff;
+
+  --brand-secondary: #1ebcb2;
+  --brand-secondary-dark: #159089;
+  --brand-secondary-light: #d2f1ef;
+  --brand-secondary-text: #ffffff;
+
+  --brand-accent: #ee7b22;
+  --brand-accent-dark: #c46040;
+  --brand-accent-light: #fbe4d3;
+  --brand-accent-text: #ffffff;
+}
+
+/* Convenience utility classes backed by the variables. Apply these to make
+   an element follow the tenant's brand colors. */
+.bg-brand-primary { background-color: var(--brand-primary); color: var(--brand-primary-text); }
+.bg-brand-secondary { background-color: var(--brand-secondary); color: var(--brand-secondary-text); }
+.bg-brand-accent { background-color: var(--brand-accent); color: var(--brand-accent-text); }
+.text-brand-primary { color: var(--brand-primary); }
+.text-brand-secondary { color: var(--brand-secondary); }
+.text-brand-accent { color: var(--brand-accent); }
+.border-brand-primary { border-color: var(--brand-primary); }
+.border-brand-secondary { border-color: var(--brand-secondary); }
+.border-brand-accent { border-color: var(--brand-accent); }
+.ring-brand-secondary:focus { --tw-ring-color: var(--brand-secondary); }
+
+.bg-brand-primary-hover:hover { background-color: var(--brand-primary-dark); }
+.bg-brand-accent-hover:hover { background-color: var(--brand-accent-dark); }

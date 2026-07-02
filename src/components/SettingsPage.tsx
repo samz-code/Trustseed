@@ -1,0 +1,1096 @@
+import React, { useState, useEffect } from 'react';
+import { useAuth } from '../contexts/AuthContext';
+import { supabase } from '../lib/supabase';
+import type { TenantAdmin } from '../types';
+import { applyBranding } from '../lib/branding';
+import { CURRENCY_SYMBOLS } from '../lib/currency';
+import {
+  Settings,
+  Users,
+  Building,
+  Globe,
+  Shield,
+  Palette,
+  Loader2,
+  Save,
+  Plus,
+  Edit,
+  X,
+  Upload,
+  Link as LinkIcon,
+  CheckCircle2,
+  ShieldAlert,
+} from 'lucide-react';
+
+interface IntegrationField {
+  key: string;
+  label: string;
+  type: 'text' | 'password' | 'select';
+  placeholder?: string;
+  options?: string[];
+}
+
+interface IntegrationDef {
+  id: string;
+  label: string;
+  fields: IntegrationField[];
+}
+
+const INTEGRATIONS: IntegrationDef[] = [
+  {
+    id: 'mpesa',
+    label: 'M-Pesa',
+    fields: [
+      { key: 'paybill_number', label: 'Paybill / Till Number', type: 'text' },
+      { key: 'consumer_key', label: 'Consumer Key', type: 'password' },
+      { key: 'consumer_secret', label: 'Consumer Secret', type: 'password' },
+      { key: 'passkey', label: 'Passkey', type: 'password' },
+      { key: 'environment', label: 'Environment', type: 'select', options: ['sandbox', 'production'] },
+    ],
+  },
+  {
+    id: 'mtn',
+    label: 'MTN Mobile Money',
+    fields: [
+      { key: 'api_key', label: 'API Key', type: 'password' },
+      { key: 'subscription_key', label: 'Subscription Key', type: 'password' },
+      { key: 'target_environment', label: 'Target Environment', type: 'text', placeholder: 'sandbox' },
+    ],
+  },
+  {
+    id: 'bank',
+    label: 'Bank API',
+    fields: [
+      { key: 'bank_name', label: 'Bank Name', type: 'text' },
+      { key: 'account_number', label: 'Account Number', type: 'text' },
+      { key: 'api_key', label: 'API Key', type: 'password' },
+    ],
+  },
+  {
+    id: 'sms',
+    label: 'SMS Gateway',
+    fields: [
+      { key: 'provider', label: 'Provider', type: 'text', placeholder: "e.g. Africa's Talking" },
+      { key: 'api_key', label: 'API Key', type: 'password' },
+      { key: 'sender_id', label: 'Sender ID', type: 'text' },
+    ],
+  },
+  {
+    id: 'email',
+    label: 'Email Service',
+    fields: [
+      { key: 'provider', label: 'Provider', type: 'text', placeholder: 'e.g. SendGrid, SMTP' },
+      { key: 'api_key', label: 'API Key', type: 'password' },
+      { key: 'from_address', label: 'From Email Address', type: 'text' },
+    ],
+  },
+];
+
+// Currencies offered in the dropdowns, derived from the shared symbol map so
+// there's one source of truth. KES first since that's the primary market.
+const CURRENCY_OPTIONS = ['KES', 'USD', 'SSP', 'UGX', 'TZS', 'RWF', 'EUR', 'GBP', 'NGN'].filter(
+  (c) => c in CURRENCY_SYMBOLS
+);
+
+interface SettingsPageProps {
+  tab?: string;
+}
+
+interface BranchForm {
+  name: string;
+  code: string;
+  address: string;
+  operating_currency: string;
+}
+
+const EMPTY_BRANCH_FORM: BranchForm = {
+  name: '',
+  code: '',
+  address: '',
+  operating_currency: 'KES',
+};
+
+export function SettingsPage({ tab = 'general' }: SettingsPageProps) {
+  const { tenant, branches, branch, refreshTenant } = useAuth();
+  const [activeTab, setActiveTab] = useState(tab);
+  const [saving, setSaving] = useState(false);
+  const [saveMessage, setSaveMessage] = useState<string | null>(null);
+  const [admins, setAdmins] = useState<TenantAdmin[]>([]);
+  const [formData, setFormData] = useState({
+    institution_name: '',
+    primary_color: '#641f60',
+    secondary_color: '#1ebcb2',
+    accent_color: '#ee7b22',
+    default_currency: 'KES',
+    timezone: 'Africa/Nairobi',
+    website: '',
+  });
+  const [logoUrl, setLogoUrl] = useState<string | null>(null);
+  const [logoUploading, setLogoUploading] = useState(false);
+  const [logoError, setLogoError] = useState<string | null>(null);
+
+  const [integrationSettings, setIntegrationSettings] = useState<Record<string, Record<string, string>>>({});
+  const [activeIntegration, setActiveIntegration] = useState<IntegrationDef | null>(null);
+  const [integrationForm, setIntegrationForm] = useState<Record<string, string>>({});
+  const [integrationSaving, setIntegrationSaving] = useState(false);
+  const [integrationError, setIntegrationError] = useState<string | null>(null);
+
+  const [showBranchForm, setShowBranchForm] = useState(false);
+  const [branchFormData, setBranchFormData] = useState<BranchForm>(EMPTY_BRANCH_FORM);
+  const [branchFormError, setBranchFormError] = useState<string | null>(null);
+  const [branchSubmitting, setBranchSubmitting] = useState(false);
+
+  useEffect(() => {
+    if (tenant) {
+      loadAdmins();
+      const settings = tenant.settings as {
+        branding?: { primary_color?: string; secondary_color?: string; accent_color?: string; logo_url?: string };
+        default_currency?: string;
+        timezone?: string;
+        website?: string;
+        integrations?: Record<string, Record<string, string>>;
+      } | null;
+
+      setFormData({
+        institution_name: tenant.name || '',
+        primary_color: settings?.branding?.primary_color || '#641f60',
+        secondary_color: settings?.branding?.secondary_color || '#1ebcb2',
+        accent_color: settings?.branding?.accent_color || '#ee7b22',
+        default_currency: settings?.default_currency || 'KES',
+        timezone: settings?.timezone || 'Africa/Nairobi',
+        website: settings?.website || '',
+      });
+      setLogoUrl(settings?.branding?.logo_url || null);
+      setIntegrationSettings(settings?.integrations || {});
+      setBranchFormData((prev) => ({
+        ...prev,
+        operating_currency: settings?.default_currency || 'KES',
+      }));
+    }
+  }, [tenant]);
+
+  const loadAdmins = async () => {
+    if (!tenant) return;
+    try {
+      const { data } = await supabase
+        .from('tenant_admins')
+        .select('*')
+        .eq('tenant_id', tenant.id);
+      if (data) setAdmins(data as TenantAdmin[]);
+    } catch (err) {
+      console.error('Error loading admins:', err);
+    }
+  };
+
+  // Live preview: apply brand colors to the running app the moment they change
+  // in the pickers, so the admin sees the effect before saving.
+  const previewBranding = (primary: string, secondary: string, accent: string) => {
+    applyBranding({ primary, secondary, accent });
+  };
+
+  const handleSaveSettings = async () => {
+    if (!tenant) return;
+    setSaving(true);
+    setSaveMessage(null);
+    try {
+      const existing = (tenant.settings as Record<string, unknown>) || {};
+      const existingEnabled = Array.isArray((existing as { enabled_currencies?: string[] }).enabled_currencies)
+        ? ((existing as { enabled_currencies?: string[] }).enabled_currencies as string[])
+        : [];
+      // Guarantee the default currency is part of the enabled set.
+      const enabledCurrencies = Array.from(
+        new Set([formData.default_currency, ...existingEnabled])
+      );
+
+      const { error } = await supabase
+        .from('tenants')
+        .update({
+          name: formData.institution_name,
+          settings: {
+            ...existing,
+            branding: {
+              primary_color: formData.primary_color,
+              secondary_color: formData.secondary_color,
+              accent_color: formData.accent_color,
+              logo_url: logoUrl,
+            },
+            default_currency: formData.default_currency,
+            enabled_currencies: enabledCurrencies,
+            timezone: formData.timezone,
+            website: formData.website.trim() || null,
+            language: '',
+            notification_settings: {
+              sms_enabled: false,
+              email_enabled: false,
+              push_enabled: false
+            },
+            compliance: {
+              large_transaction_threshold: 0,
+              kyc_required: false,
+              aml_screening_enabled: false
+            }
+          },
+        })
+        .eq('id', tenant.id);
+      if (error) throw error;
+
+      // Apply immediately so the whole app reflects the new colors, then
+      // refresh tenant so context (and every useCurrency consumer) updates.
+      applyBranding({
+        primary: formData.primary_color,
+        secondary: formData.secondary_color,
+        accent: formData.accent_color,
+      });
+      await refreshTenant();
+      setSaveMessage('Settings saved.');
+    } catch (err) {
+      console.error('Error saving settings:', err);
+      const supaErr = err as { message?: string } | null;
+      setSaveMessage(supaErr?.message || 'Failed to save settings.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleLogoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !tenant) return;
+
+    if (!file.type.startsWith('image/')) {
+      setLogoError('Please upload an image file (PNG, JPG, SVG).');
+      return;
+    }
+    if (file.size > 2 * 1024 * 1024) {
+      setLogoError('Logo must be under 2MB.');
+      return;
+    }
+
+    setLogoError(null);
+    setLogoUploading(true);
+    try {
+      const ext = file.name.split('.').pop();
+      const path = `${tenant.id}/logo-${Date.now()}.${ext}`;
+
+      const { error: uploadError } = await supabase.storage
+        .from('tenant-logos')
+        .upload(path, file, { upsert: true });
+      if (uploadError) throw uploadError;
+
+      const { data: publicUrlData } = supabase.storage.from('tenant-logos').getPublicUrl(path);
+      const newLogoUrl = publicUrlData.publicUrl;
+
+      // Persist immediately rather than waiting for "Save Changes", so a
+      // logo upload can't be lost if the admin navigates away.
+      const existing = (tenant.settings as Record<string, unknown>) || {};
+      const existingBranding =
+        ((existing as { branding?: Record<string, unknown> }).branding as Record<string, unknown>) || {};
+      await supabase
+        .from('tenants')
+        .update({
+          settings: {
+            ...existing,
+            branding: {
+              ...existingBranding,
+              primary_color: formData.primary_color,
+              secondary_color: formData.secondary_color,
+              accent_color: formData.accent_color,
+              logo_url: newLogoUrl,
+            },
+            default_currency: '',
+            enabled_currencies: [],
+            timezone: '',
+            language: '',
+            notification_settings: {
+              sms_enabled: false,
+              email_enabled: false,
+              push_enabled: false
+            },
+            compliance: {
+              large_transaction_threshold: 0,
+              kyc_required: false,
+              aml_screening_enabled: false
+            }
+          },
+        })
+        .eq('id', tenant.id);
+
+      setLogoUrl(newLogoUrl);
+      await refreshTenant();
+    } catch (err) {
+      console.error('Error uploading logo:', err);
+      const supaErr = err as { message?: string } | null;
+      setLogoError(supaErr?.message || 'Failed to upload logo');
+    } finally {
+      setLogoUploading(false);
+    }
+  };
+
+  const openIntegrationForm = (integration: IntegrationDef) => {
+    setActiveIntegration(integration);
+    setIntegrationForm(integrationSettings[integration.id] || {});
+    setIntegrationError(null);
+  };
+
+  const closeIntegrationForm = () => {
+    setActiveIntegration(null);
+    setIntegrationForm({});
+    setIntegrationError(null);
+  };
+
+  const handleSaveIntegration = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!tenant || !activeIntegration) return;
+    setIntegrationError(null);
+
+    const missing = activeIntegration.fields.find((f) => !integrationForm[f.key]?.trim());
+    if (missing) {
+      setIntegrationError(`${missing.label} is required.`);
+      return;
+    }
+
+    setIntegrationSaving(true);
+    try {
+      const updatedIntegrations = {
+        ...integrationSettings,
+        [activeIntegration.id]: {
+          ...integrationForm,
+          enabled: 'true',
+          configured_at: new Date().toISOString(),
+        },
+      };
+
+      const existing = (tenant.settings as Record<string, unknown>) || {};
+      const { error } = await supabase
+        .from('tenants')
+        .update({
+          settings: {
+            ...existing,
+            integrations: updatedIntegrations,
+            default_currency: '',
+            enabled_currencies: [],
+            branding: {
+              primary_color: '',
+              secondary_color: '',
+              accent_color: undefined,
+              logo_url: null
+            },
+            timezone: '',
+            language: '',
+            notification_settings: {
+              sms_enabled: false,
+              email_enabled: false,
+              push_enabled: false
+            },
+            compliance: {
+              large_transaction_threshold: 0,
+              kyc_required: false,
+              aml_screening_enabled: false
+            }
+          },
+        })
+        .eq('id', tenant.id);
+      if (error) throw error;
+
+      setIntegrationSettings(updatedIntegrations);
+      await refreshTenant();
+      closeIntegrationForm();
+    } catch (err) {
+      console.error('Error saving integration:', err);
+      const supaErr = err as { message?: string; details?: string; hint?: string } | null;
+      setIntegrationError(
+        supaErr?.message || supaErr?.details || supaErr?.hint || 'Failed to save integration'
+      );
+    } finally {
+      setIntegrationSaving(false);
+    }
+  };
+
+  const openCreateBranchForm = () => {
+    setBranchFormData({
+      ...EMPTY_BRANCH_FORM,
+      operating_currency:
+        (tenant?.settings as { default_currency?: string } | null)?.default_currency || 'KES',
+    });
+    setBranchFormError(null);
+    setShowBranchForm(true);
+  };
+
+  const closeBranchForm = () => {
+    setShowBranchForm(false);
+    setBranchFormData(EMPTY_BRANCH_FORM);
+    setBranchFormError(null);
+  };
+
+  const handleCreateBranch = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBranchFormError(null);
+
+    if (!tenant) {
+      setBranchFormError('No institution context found. Please sign in again.');
+      return;
+    }
+    if (!branchFormData.name.trim()) {
+      setBranchFormError('Branch name is required.');
+      return;
+    }
+    if (!branchFormData.code.trim()) {
+      setBranchFormError('Branch code is required.');
+      return;
+    }
+    const codeExists = branches.some(
+      (b) => b.code.trim().toLowerCase() === branchFormData.code.trim().toLowerCase()
+    );
+    if (codeExists) {
+      setBranchFormError(`Branch code "${branchFormData.code.trim()}" is already in use.`);
+      return;
+    }
+
+    setBranchSubmitting(true);
+    try {
+      const { error } = await supabase.from('branches').insert({
+        tenant_id: tenant.id,
+        name: branchFormData.name.trim(),
+        code: branchFormData.code.trim(),
+        address: branchFormData.address.trim() || null,
+        is_head_office: false,
+        status: 'active',
+        operating_currencies: [branchFormData.operating_currency],
+        first_day_setup_completed: false,
+      });
+      if (error) throw error;
+
+      await refreshTenant();
+      closeBranchForm();
+    } catch (err) {
+      console.error('Error creating branch:', err);
+      const supaErr = err as { message?: string; details?: string; hint?: string } | null;
+      setBranchFormError(
+        supaErr?.message || supaErr?.details || supaErr?.hint || 'Failed to create branch'
+      );
+    } finally {
+      setBranchSubmitting(false);
+    }
+  };
+
+  const tabs = [
+    { id: 'general', label: 'General', icon: <Settings className="w-4 h-4" /> },
+    { id: 'users', label: 'Users', icon: <Users className="w-4 h-4" /> },
+    { id: 'branches', label: 'Branches', icon: <Building className="w-4 h-4" /> },
+    { id: 'branding', label: 'Branding', icon: <Palette className="w-4 h-4" /> },
+    { id: 'compliance', label: 'Compliance', icon: <Shield className="w-4 h-4" /> },
+    { id: 'integrations', label: 'Integrations', icon: <Globe className="w-4 h-4" /> },
+  ];
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h1 className="text-2xl font-bold text-[#641f60]">Settings</h1>
+        <p className="text-slate-600 mt-1">Manage your institution settings and preferences</p>
+      </div>
+
+      <div className="bg-white rounded-xl border border-[#dae1e1] p-2">
+        <div className="flex gap-2 overflow-x-auto">
+          {tabs.map(tabItem => (
+            <button
+              key={tabItem.id}
+              onClick={() => setActiveTab(tabItem.id)}
+              className={`flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-all whitespace-nowrap ${
+                activeTab === tabItem.id
+                  ? 'bg-gradient-to-r from-[#ee7b22] to-[#c46040] text-white'
+                  : 'text-slate-600 hover:bg-slate-100'
+              }`}
+            >
+              {tabItem.icon}
+              {tabItem.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="bg-white rounded-xl border border-[#dae1e1] overflow-hidden">
+        {activeTab === 'general' && (
+          <div className="p-6 space-y-6">
+            <h2 className="text-lg font-semibold text-slate-900">General Settings</h2>
+            <div className="grid md:grid-cols-2 gap-6">
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">
+                  Institution Name
+                </label>
+                <input
+                  type="text"
+                  value={formData.institution_name}
+                  onChange={e => setFormData({ ...formData, institution_name: e.target.value })}
+                  className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#1ebcb2]"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">
+                  Default Currency
+                </label>
+                <select
+                  value={formData.default_currency}
+                  onChange={e => setFormData({ ...formData, default_currency: e.target.value })}
+                  className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#1ebcb2]"
+                >
+                  {CURRENCY_OPTIONS.map((code) => (
+                    <option key={code} value={code}>
+                      {code} ({CURRENCY_SYMBOLS[code]})
+                    </option>
+                  ))}
+                </select>
+                <p className="text-xs text-slate-400 mt-1">
+                  Used as the display currency across dashboards and reports.
+                </p>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">
+                  Timezone
+                </label>
+                <select
+                  value={formData.timezone}
+                  onChange={e => setFormData({ ...formData, timezone: e.target.value })}
+                  className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#1ebcb2]"
+                >
+                  <option value="Africa/Nairobi">Africa/Nairobi (EAT)</option>
+                  <option value="Africa/Kampala">Africa/Kampala</option>
+                  <option value="Africa/Juba">Africa/Juba</option>
+                  <option value="UTC">UTC</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">
+                  Website
+                </label>
+                <div className="relative">
+                  <LinkIcon className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                  <input
+                    type="url"
+                    value={formData.website}
+                    onChange={e => setFormData({ ...formData, website: e.target.value })}
+                    placeholder="https://yourinstitution.com"
+                    className="w-full pl-9 pr-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#1ebcb2]"
+                  />
+                </div>
+              </div>
+            </div>
+            <div className="flex items-center justify-end gap-3">
+              {saveMessage && <span className="text-sm text-slate-500">{saveMessage}</span>}
+              <button
+                onClick={handleSaveSettings}
+                disabled={saving}
+                className="px-6 py-2.5 bg-gradient-to-r from-[#ee7b22] to-[#c46040] text-white rounded-lg flex items-center gap-2 disabled:opacity-50"
+              >
+                {saving ? <Loader2 className="w-5 h-5 animate-spin" /> : <Save className="w-5 h-5" />}
+                Save Changes
+              </button>
+            </div>
+          </div>
+        )}
+
+        {activeTab === 'users' && (
+          <div className="p-6">
+            <div className="flex items-center justify-between mb-6">
+              <h2 className="text-lg font-semibold text-slate-900">User Management</h2>
+              <button className="px-4 py-2 bg-[#1ebcb2] text-white rounded-lg flex items-center gap-2">
+                <Plus className="w-4 h-4" />
+                Add User
+              </button>
+            </div>
+            <div className="divide-y divide-[#dae1e1]">
+              {admins.map(adminUser => (
+                <div key={adminUser.id} className="py-4 flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 rounded-full bg-gradient-to-br from-[#1ebcb2] to-[#7eccc6] flex items-center justify-center text-white font-medium">
+                      {adminUser.full_name?.[0] || 'U'}
+                    </div>
+                    <div>
+                      <p className="font-medium text-slate-900">{adminUser.full_name}</p>
+                      <p className="text-sm text-slate-500">{adminUser.email}</p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-4">
+                    <span className="px-2.5 py-1 rounded-full text-xs font-medium bg-blue-100 text-blue-700">
+                      {adminUser.role.replace('_', ' ')}
+                    </span>
+                    <button className="p-2 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100">
+                      <Edit className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {activeTab === 'branches' && (
+          <div className="p-6">
+            <div className="flex items-center justify-between mb-6">
+              <h2 className="text-lg font-semibold text-slate-900">Branch Management</h2>
+              <button
+                onClick={openCreateBranchForm}
+                className="px-4 py-2 bg-[#1ebcb2] hover:bg-[#159089] text-white rounded-lg flex items-center gap-2 transition-colors"
+              >
+                <Plus className="w-4 h-4" />
+                Add Branch
+              </button>
+            </div>
+            {branches.length > 0 ? (
+              <div className="grid md:grid-cols-2 gap-4">
+                {branches.map(b => (
+                  <div key={b.id} className={`p-4 rounded-lg border ${b.id === branch?.id ? 'border-[#1ebcb2] bg-[#1ebcb2]/5' : 'border-[#dae1e1]'}`}>
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="font-medium text-slate-900">{b.name}</span>
+                      {b.is_head_office && (
+                        <span className="px-2 py-0.5 bg-slate-100 text-slate-600 text-xs rounded">HQ</span>
+                      )}
+                    </div>
+                    <p className="text-sm text-slate-500">{b.code}</p>
+                    <p className="text-xs text-slate-400 mt-2">
+                      Status: <span className={b.status === 'active' ? 'text-green-600' : 'text-slate-500'}>{b.status}</span>
+                    </p>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="py-12 text-center">
+                <Building className="w-12 h-12 text-slate-300 mx-auto mb-3" />
+                <p className="text-slate-500">No branches yet</p>
+              </div>
+            )}
+          </div>
+        )}
+
+        {activeTab === 'branding' && (
+          <div className="p-6 space-y-6">
+            <h2 className="text-lg font-semibold text-slate-900">Branding</h2>
+
+            <div>
+              <label className="block text-sm font-medium text-slate-700 mb-2">Logo</label>
+              <div className="flex items-center gap-4">
+                <div className="w-20 h-20 rounded-xl border border-slate-200 bg-slate-50 flex items-center justify-center overflow-hidden flex-shrink-0">
+                  {logoUrl ? (
+                    <img src={logoUrl} alt="Institution logo" className="w-full h-full object-contain" />
+                  ) : (
+                    <Building className="w-8 h-8 text-slate-300" />
+                  )}
+                </div>
+                <div>
+                  <label className="inline-flex items-center gap-2 px-4 py-2 border border-slate-300 rounded-lg text-sm font-medium text-slate-700 hover:bg-slate-50 cursor-pointer transition-colors">
+                    {logoUploading ? (
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                    ) : (
+                      <Upload className="w-4 h-4" />
+                    )}
+                    {logoUploading ? 'Uploading...' : 'Upload logo'}
+                    <input
+                      type="file"
+                      accept="image/*"
+                      onChange={handleLogoUpload}
+                      disabled={logoUploading}
+                      className="hidden"
+                    />
+                  </label>
+                  <p className="text-xs text-slate-400 mt-1.5">PNG, JPG, or SVG. Max 2MB.</p>
+                  {logoError && <p className="text-xs text-[#c46040] mt-1">{logoError}</p>}
+                </div>
+              </div>
+            </div>
+
+            <div className="grid md:grid-cols-3 gap-6">
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-2">Primary Color</label>
+                <div className="flex items-center gap-3">
+                  <input
+                    type="color"
+                    value={formData.primary_color}
+                    onChange={e => {
+                      const v = e.target.value;
+                      setFormData(prev => ({ ...prev, primary_color: v }));
+                      previewBranding(v, formData.secondary_color, formData.accent_color);
+                    }}
+                    className="w-12 h-12 rounded-lg cursor-pointer border border-slate-300"
+                  />
+                  <input
+                    type="text"
+                    value={formData.primary_color}
+                    onChange={e => {
+                      const v = e.target.value;
+                      setFormData(prev => ({ ...prev, primary_color: v }));
+                      previewBranding(v, formData.secondary_color, formData.accent_color);
+                    }}
+                    className="flex-1 px-4 py-2.5 border border-slate-300 rounded-lg"
+                  />
+                </div>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-2">Secondary Color</label>
+                <div className="flex items-center gap-3">
+                  <input
+                    type="color"
+                    value={formData.secondary_color}
+                    onChange={e => {
+                      const v = e.target.value;
+                      setFormData(prev => ({ ...prev, secondary_color: v }));
+                      previewBranding(formData.primary_color, v, formData.accent_color);
+                    }}
+                    className="w-12 h-12 rounded-lg cursor-pointer border border-slate-300"
+                  />
+                  <input
+                    type="text"
+                    value={formData.secondary_color}
+                    onChange={e => {
+                      const v = e.target.value;
+                      setFormData(prev => ({ ...prev, secondary_color: v }));
+                      previewBranding(formData.primary_color, v, formData.accent_color);
+                    }}
+                    className="flex-1 px-4 py-2.5 border border-slate-300 rounded-lg"
+                  />
+                </div>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-2">Accent Color</label>
+                <div className="flex items-center gap-3">
+                  <input
+                    type="color"
+                    value={formData.accent_color}
+                    onChange={e => {
+                      const v = e.target.value;
+                      setFormData(prev => ({ ...prev, accent_color: v }));
+                      previewBranding(formData.primary_color, formData.secondary_color, v);
+                    }}
+                    className="w-12 h-12 rounded-lg cursor-pointer border border-slate-300"
+                  />
+                  <input
+                    type="text"
+                    value={formData.accent_color}
+                    onChange={e => {
+                      const v = e.target.value;
+                      setFormData(prev => ({ ...prev, accent_color: v }));
+                      previewBranding(formData.primary_color, formData.secondary_color, v);
+                    }}
+                    className="flex-1 px-4 py-2.5 border border-slate-300 rounded-lg"
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* Live preview strip so the admin sees the palette immediately. */}
+            <div>
+              <p className="text-sm font-medium text-slate-700 mb-2">Preview</p>
+              <div className="flex flex-wrap gap-3">
+                <span
+                  className="px-4 py-2 rounded-lg text-sm font-medium"
+                  style={{ backgroundColor: 'var(--brand-primary)', color: 'var(--brand-primary-text)' }}
+                >
+                  Primary button
+                </span>
+                <span
+                  className="px-4 py-2 rounded-lg text-sm font-medium"
+                  style={{ backgroundColor: 'var(--brand-secondary)', color: 'var(--brand-secondary-text)' }}
+                >
+                  Secondary
+                </span>
+                <span
+                  className="px-4 py-2 rounded-lg text-sm font-medium"
+                  style={{ backgroundColor: 'var(--brand-accent)', color: 'var(--brand-accent-text)' }}
+                >
+                  Accent
+                </span>
+              </div>
+              <p className="text-xs text-slate-400 mt-2">
+                Colors preview instantly. Click &ldquo;Save Branding&rdquo; to make them permanent.
+              </p>
+            </div>
+
+            <div className="flex items-center justify-end gap-3">
+              {saveMessage && <span className="text-sm text-slate-500">{saveMessage}</span>}
+              <button
+                onClick={handleSaveSettings}
+                disabled={saving}
+                className="px-6 py-2.5 bg-gradient-to-r from-[#ee7b22] to-[#c46040] text-white rounded-lg flex items-center gap-2 disabled:opacity-50"
+              >
+                {saving ? <Loader2 className="w-5 h-5 animate-spin" /> : <Save className="w-5 h-5" />}
+                Save Branding
+              </button>
+            </div>
+          </div>
+        )}
+
+        {activeTab === 'compliance' && (
+          <div className="p-6">
+            <h2 className="text-lg font-semibold text-slate-900 mb-6">Compliance Settings</h2>
+            <div className="space-y-4">
+              <div className="flex items-center justify-between p-4 border border-[#dae1e1] rounded-lg">
+                <div>
+                  <p className="font-medium text-slate-900">KYC Required</p>
+                  <p className="text-sm text-slate-500">Require KYC verification for all customers</p>
+                </div>
+                <input type="checkbox" defaultChecked className="w-5 h-5 text-[#1ebcb2]" />
+              </div>
+              <div className="flex items-center justify-between p-4 border border-[#dae1e1] rounded-lg">
+                <div>
+                  <p className="font-medium text-slate-900">AML Screening</p>
+                  <p className="text-sm text-slate-500">Enable AML screening for transactions</p>
+                </div>
+                <input type="checkbox" defaultChecked className="w-5 h-5 text-[#1ebcb2]" />
+              </div>
+              <div className="flex items-center justify-between p-4 border border-[#dae1e1] rounded-lg">
+                <div>
+                  <p className="font-medium text-slate-900">Large Transaction Threshold</p>
+                  <p className="text-sm text-slate-500">Transactions above this amount require approval</p>
+                </div>
+                <input
+                  type="number"
+                  defaultValue={10000}
+                  className="w-32 px-3 py-2 border border-slate-300 rounded-lg text-right"
+                />
+              </div>
+            </div>
+          </div>
+        )}
+
+        {activeTab === 'integrations' && (
+          <div className="p-6">
+            <h2 className="text-lg font-semibold text-slate-900 mb-2">Integrations</h2>
+            <div className="flex items-start gap-2 text-xs text-slate-500 bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 mb-6">
+              <ShieldAlert className="w-4 h-4 flex-shrink-0 mt-0.5 text-[#ee7b22]" />
+              <span>
+                Credentials entered here are stored on your tenant record. Before going live with
+                real payment processing, move production secrets to server-side storage (Supabase
+                Vault / Edge Function secrets) rather than a client-readable table.
+              </span>
+            </div>
+            <div className="grid md:grid-cols-2 gap-4">
+              {INTEGRATIONS.map((integration) => {
+                const configured = integrationSettings[integration.id]?.enabled === 'true';
+                return (
+                  <div
+                    key={integration.id}
+                    className="p-4 border border-[#dae1e1] rounded-lg flex items-center justify-between"
+                  >
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <p className="font-medium text-slate-900">{integration.label}</p>
+                        {configured && (
+                          <span className="flex items-center gap-1 text-xs text-[#1ebcb2] font-medium">
+                            <CheckCircle2 className="w-3.5 h-3.5" />
+                            Connected
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-sm text-slate-500">
+                        {configured ? 'Configured' : `Configure ${integration.label} integration`}
+                      </p>
+                    </div>
+                    <button
+                      onClick={() => openIntegrationForm(integration)}
+                      className="px-4 py-2 border border-[#dae1e1] rounded-lg text-sm hover:bg-slate-50 transition-colors"
+                    >
+                      {configured ? 'Edit' : 'Configure'}
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Create Branch modal */}
+      {showBranchForm && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full">
+            <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between">
+              <h2 className="text-xl font-bold text-[#641f60]">Add Branch</h2>
+              <button
+                onClick={closeBranchForm}
+                className="p-2 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition-colors"
+                aria-label="Close"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleCreateBranch} className="p-6 space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">Branch Name *</label>
+                <input
+                  type="text"
+                  required
+                  value={branchFormData.name}
+                  onChange={(e) => setBranchFormData((prev) => ({ ...prev, name: e.target.value }))}
+                  className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#1ebcb2] focus:border-transparent"
+                  placeholder="Mombasa Branch"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">Branch Code *</label>
+                <input
+                  type="text"
+                  required
+                  value={branchFormData.code}
+                  onChange={(e) => setBranchFormData((prev) => ({ ...prev, code: e.target.value }))}
+                  className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#1ebcb2] focus:border-transparent"
+                  placeholder="MSA-01"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">Address</label>
+                <input
+                  type="text"
+                  value={branchFormData.address}
+                  onChange={(e) => setBranchFormData((prev) => ({ ...prev, address: e.target.value }))}
+                  className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#1ebcb2] focus:border-transparent"
+                  placeholder="Optional"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">Operating Currency</label>
+                <select
+                  value={branchFormData.operating_currency}
+                  onChange={(e) =>
+                    setBranchFormData((prev) => ({ ...prev, operating_currency: e.target.value }))
+                  }
+                  className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#1ebcb2] focus:border-transparent"
+                >
+                  {CURRENCY_OPTIONS.map((code) => (
+                    <option key={code} value={code}>
+                      {code} ({CURRENCY_SYMBOLS[code]})
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {branchFormError && (
+                <div className="p-3 bg-[#c46040]/10 border border-[#c46040]/30 rounded-lg text-[#c46040] text-sm">
+                  {branchFormError}
+                </div>
+              )}
+
+              <div className="flex items-center justify-end gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={closeBranchForm}
+                  className="px-4 py-2.5 border border-slate-300 text-slate-700 font-medium rounded-lg hover:bg-slate-50 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={branchSubmitting}
+                  className="px-6 py-2.5 bg-[#1ebcb2] hover:bg-[#159089] text-white font-medium rounded-lg shadow-lg disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 transition-all"
+                >
+                  {branchSubmitting ? (
+                    <>
+                      <Loader2 className="w-5 h-5 animate-spin" />
+                      Creating...
+                    </>
+                  ) : (
+                    <>
+                      <Plus className="w-5 h-5" />
+                      Create Branch
+                    </>
+                  )}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Configure Integration modal */}
+      {activeIntegration && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full">
+            <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between">
+              <h2 className="text-xl font-bold text-[#641f60]">
+                Configure {activeIntegration.label}
+              </h2>
+              <button
+                onClick={closeIntegrationForm}
+                className="p-2 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition-colors"
+                aria-label="Close"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveIntegration} className="p-6 space-y-4">
+              {activeIntegration.fields.map((field) => (
+                <div key={field.key}>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">
+                    {field.label} *
+                  </label>
+                  {field.type === 'select' ? (
+                    <select
+                      required
+                      value={integrationForm[field.key] || ''}
+                      onChange={(e) =>
+                        setIntegrationForm((prev) => ({ ...prev, [field.key]: e.target.value }))
+                      }
+                      className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#1ebcb2] focus:border-transparent"
+                    >
+                      <option value="">Select...</option>
+                      {field.options?.map((opt) => (
+                        <option key={opt} value={opt}>
+                          {opt}
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <input
+                      type={field.type}
+                      required
+                      value={integrationForm[field.key] || ''}
+                      onChange={(e) =>
+                        setIntegrationForm((prev) => ({ ...prev, [field.key]: e.target.value }))
+                      }
+                      placeholder={field.placeholder}
+                      className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#1ebcb2] focus:border-transparent"
+                    />
+                  )}
+                </div>
+              ))}
+
+              {integrationError && (
+                <div className="p-3 bg-[#c46040]/10 border border-[#c46040]/30 rounded-lg text-[#c46040] text-sm">
+                  {integrationError}
+                </div>
+              )}
+
+              <div className="flex items-center justify-end gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={closeIntegrationForm}
+                  className="px-4 py-2.5 border border-slate-300 text-slate-700 font-medium rounded-lg hover:bg-slate-50 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={integrationSaving}
+                  className="px-6 py-2.5 bg-[#1ebcb2] hover:bg-[#159089] text-white font-medium rounded-lg shadow-lg disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 transition-all"
+                >
+                  {integrationSaving ? (
+                    <>
+                      <Loader2 className="w-5 h-5 animate-spin" />
+                      Saving...
+                    </>
+                  ) : (
+                    <>
+                      <Save className="w-5 h-5" />
+                      Save
+                    </>
+                  )}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
