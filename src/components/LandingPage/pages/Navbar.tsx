@@ -9,9 +9,6 @@ interface NavbarProps {
 export function Navbar({ onNavigate, onOpenMobileMenu }: NavbarProps) {
   const location = useLocation();
 
-  // Section links (#who-we-are, #features, #pricing, #contact) only exist on
-  // the landing page. From any other route, navigate home first, then scroll
-  // once the section has mounted.
   const goToSection = (id: string) => (e: React.MouseEvent) => {
     e.preventDefault();
     if (location.pathname === '/') {
@@ -27,13 +24,13 @@ export function Navbar({ onNavigate, onOpenMobileMenu }: NavbarProps) {
   return (
     <nav className="sticky top-0 left-0 right-0 z-50 bg-white shadow-lg">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        <div className="flex items-center justify-between h-24">
+        <div className="flex items-center justify-between h-16 sm:h-20 md:h-24">
           <button
             onClick={() => onNavigate('/')}
-            className="flex items-center gap-3 rounded-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-[#641f60] focus-visible:ring-offset-2"
+            className="flex items-center gap-3 rounded-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-[#641f60] focus-visible:ring-offset-2 shrink-0"
             aria-label="Go to homepage"
           >
-            <img src="/logo-bg.png" alt="Trust Seed" className="h-16 w-auto object-contain" />
+            <img src="/logo-bg.png" alt="Trust Seed" className="h-10 sm:h-12 md:h-16 w-auto object-contain" />
           </button>
 
           <div className="hidden md:flex items-center gap-8">
@@ -86,7 +83,8 @@ export function Navbar({ onNavigate, onOpenMobileMenu }: NavbarProps) {
 
           <button
             onClick={onOpenMobileMenu}
-            className="md:hidden p-2 rounded-lg text-slate-600 hover:bg-slate-100"
+            aria-label="Open menu"
+            className="md:hidden p-2 -mr-2 rounded-lg text-slate-600 hover:bg-slate-100 active:bg-slate-200 shrink-0"
           >
             <Menu className="w-6 h-6" />
           </button>
