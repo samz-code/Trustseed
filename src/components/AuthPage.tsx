@@ -118,15 +118,7 @@ export function AuthPage() {
             </div>
           </div>
 
-          <a
-            href="https://www.emonisamuel.co.ke"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-sm text-white/60 hover:text-white transition-colors"
-          >
-            Developed by Emoni Samuel
-          </a>
-          
+         
         </div>
       </aside>
 
@@ -148,8 +140,6 @@ export function AuthPage() {
               alt="Trust Seed"
               className="h-20 sm:h-24 w-auto max-w-[260px] object-contain rounded-lg mx-auto mb-4"
             />
-            <h1 className="text-2xl font-bold text-[#641f60]">Trust Seed</h1>
-            <p className="text-slate-600 text-sm">Enterprise Financial Platform</p>
           </div>
 
           {/* Desktop contextual heading */}
