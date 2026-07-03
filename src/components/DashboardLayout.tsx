@@ -25,6 +25,7 @@ import {
   UserCog,
   CheckCheck,
   Inbox,
+  Wallet2,
 } from 'lucide-react';
 
 interface DashboardLayoutProps {
@@ -95,6 +96,11 @@ const navigationItems: NavItem[] = [
       { label: 'Savings Products', path: 'savings-products' },
       { label: 'Accounts', path: 'savings-accounts' },
     ],
+  },
+  {
+    label: 'Expenses',
+    icon: <Wallet2 className="w-5 h-5" />,
+    path: 'expenses',
   },
   {
     label: 'Float',
@@ -291,13 +297,9 @@ export function DashboardLayout({ children }: DashboardLayoutProps) {
           sidebarOpen ? 'translate-x-0' : '-translate-x-full'
         }`}
       >
-        <div className="flex items-center justify-between p-3 border-b border-white/20">
-          <div className="flex items-center min-w-0 flex-1">
-            <img
-              src="/logo-bg.png"
-              alt={tenant?.name || 'Trust Seed'}
-              className="h-20 w-auto max-w-[220px] object-contain rounded-md flex-shrink-0"
-            />
+        <div className="flex items-center justify-between p-4 border-b border-white/20">
+          <div className="min-w-0 flex-1">
+         
           </div>
           <button
             onClick={() => setSidebarOpen(false)}

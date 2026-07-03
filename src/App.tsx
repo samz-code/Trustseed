@@ -25,6 +25,7 @@ import { LoanApplicationsPage } from './components/LoanApplicationsPage';
 import { RepaymentsPage } from './components/RepaymentsPage';
 import { SavingsPage } from './components/SavingsPage';
 import { SavingsProductsPage } from './components/SavingsProductsPage';
+import { ExpensesPage } from './components/ExpensesPage';
 import { FloatPage } from './components/FloatPage';
 import { DailyOpeningPage } from './components/DailyOpeningPage';
 import { DailyClosingPage } from './components/DailyClosingPage';
@@ -161,6 +162,8 @@ function AppContent() {
         return <SavingsProductsPage />;
       case 'savings-accounts':
         return <SavingsPage tab="accounts" />;
+      case 'expenses':
+        return <ExpensesPage />;
       case 'float':
         return <FloatPage />;
       case 'daily-opening':

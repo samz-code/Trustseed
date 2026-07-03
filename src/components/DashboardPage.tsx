@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { supabase } from '../lib/supabase';
+import { fetchExpenseSummary, type ExpenseSummary } from '../lib/expenses';
 import {
   Users,
   Wallet,
@@ -12,6 +13,7 @@ import {
   Banknote,
   PiggyBank,
   RefreshCw,
+  Receipt,
 } from 'lucide-react';
 
 type ChangeType = 'positive' | 'negative' | 'neutral';
@@ -72,6 +74,13 @@ const EMPTY: DashboardData = {
   pendingApprovals: [],
 };
 
+const EMPTY_EXPENSES: ExpenseSummary = {
+  totalToday: 0,
+  totalThisMonth: 0,
+  pendingCount: 0,
+  pendingTotal: 0,
+};
+
 function formatMoney(value: number, currency = 'KES'): string {
   const symbol = currency === 'USD' ? '$' : currency === 'KES' ? 'KSh ' : `${currency} `;
   return `${symbol}${value.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
@@ -97,6 +106,7 @@ export function DashboardPage() {
   const { tenant, admin, branch, branches } = useAuth();
 
   const [data, setData] = useState<DashboardData>(EMPTY);
+  const [expenseSummary, setExpenseSummary] = useState<ExpenseSummary>(EMPTY_EXPENSES);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -268,6 +278,12 @@ export function DashboardPage() {
         };
       });
 
+      // --- Expenses summary ---
+      const expSummary = await fetchExpenseSummary(
+        tenant!.id,
+        seesAllBranches ? null : branchId
+      );
+
       setData({
         customerCount: customersRes.count ?? 0,
         walletCount: wallets.length,
@@ -281,10 +297,12 @@ export function DashboardPage() {
         recentTransactions,
         pendingApprovals,
       });
+      setExpenseSummary(expSummary);
     } catch (err) {
       console.error('Dashboard load error:', err);
       setError(err instanceof Error ? err.message : 'Failed to load dashboard data');
       setData(EMPTY);
+      setExpenseSummary(EMPTY_EXPENSES);
     } finally {
       setLoading(false);
     }
@@ -341,6 +359,17 @@ export function DashboardPage() {
       change: `${formatMoney(data.walletTotal, defaultCurrency)} total`,
       changeType: 'neutral',
       icon: <Wallet className="w-6 h-6" />,
+      color: 'orange',
+    },
+    {
+      label: 'Expenses (Month)',
+      value: formatMoney(expenseSummary.totalThisMonth, defaultCurrency),
+      change:
+        expenseSummary.pendingCount > 0
+          ? `${expenseSummary.pendingCount} pending`
+          : 'all clear',
+      changeType: expenseSummary.pendingCount > 0 ? 'negative' : 'neutral',
+      icon: <Receipt className="w-6 h-6" />,
       color: 'orange',
     },
   ];
@@ -418,9 +447,9 @@ export function DashboardPage() {
       )}
 
       {/* Stats */}
-      <div className="grid sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4">
+      <div className="grid sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-7 gap-4">
         {loading
-          ? Array.from({ length: 6 }).map((_, idx) => (
+          ? Array.from({ length: 7 }).map((_, idx) => (
               <div key={idx} className="bg-white rounded-xl border border-slate-200 p-5 animate-pulse">
                 <div className="w-10 h-10 rounded-lg bg-slate-200 mb-3" />
                 <div className="h-7 w-20 bg-slate-200 rounded mb-2" />
@@ -432,13 +461,26 @@ export function DashboardPage() {
               return (
                 <div
                   key={idx}
-                  className="bg-white rounded-xl border border-slate-200 p-5 hover:shadow-lg transition-shadow"
+                  onClick={() => {
+                    if (stat.label === 'Expenses (Month)') {
+                      window.dispatchEvent(new CustomEvent('navigate', { detail: 'expenses' }));
+                    }
+                  }}
+                  className={`bg-white rounded-xl border border-slate-200 p-5 hover:shadow-lg transition-shadow ${
+                    stat.label === 'Expenses (Month)' ? 'cursor-pointer' : ''
+                  }`}
                 >
                   <div className="flex items-center justify-between mb-3">
                     <div className={`p-2.5 rounded-lg ${c.bg}`}>
                       <span className={c.text}>{stat.icon}</span>
                     </div>
-                    <span className="text-xs font-medium px-2 py-1 rounded-full bg-slate-100 text-slate-600">
+                    <span
+                      className={`text-xs font-medium px-2 py-1 rounded-full ${
+                        stat.changeType === 'negative'
+                          ? 'bg-[#c46040]/10 text-[#c46040]'
+                          : 'bg-slate-100 text-slate-600'
+                      }`}
+                    >
                       {stat.change}
                     </span>
                   </div>

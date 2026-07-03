@@ -83,16 +83,19 @@ export function AuthPage() {
         <div className="absolute -bottom-32 -left-20 w-[28rem] h-[28rem] rounded-full bg-[#ee7b22]/20 blur-3xl" />
         <div className="absolute inset-0 bg-gradient-to-br from-[#641f60] via-[#641f60] to-[#4a1646]" />
 
-        <div className="relative z-10 flex flex-col justify-between w-full p-12 xl:p-16 2xl:p-20 text-white">
-          {/* Brand lockup */}
-          <div className="flex items-center">
-            <img
-              src="/logo-bg.png"
-              alt="Trust Seed"
-              className="h-16 xl:h-20 w-auto max-w-[280px] object-contain rounded-lg shadow-lg"
-            />
-          </div>
+        {/* subtle grid texture so the lower empty area doesn't feel flat */}
+        <div
+          className="absolute inset-0 opacity-[0.06]"
+          style={{
+            backgroundImage:
+              'linear-gradient(#fff 1px, transparent 1px), linear-gradient(90deg, #fff 1px, transparent 1px)',
+            backgroundSize: '48px 48px',
+          }}
+        />
 
+        <div className="relative z-10 flex flex-col justify-between w-full p-12 xl:p-16 2xl:p-20 text-white">
+          {/* Brand lockup - text only, no image dependency */}
+        
           {/* Value proposition */}
           <div className="max-w-lg py-12">
             <h2 className="text-4xl xl:text-5xl font-bold leading-[1.1] mb-6">
@@ -118,7 +121,23 @@ export function AuthPage() {
             </div>
           </div>
 
-         
+          {/* Bottom trust strip - fills the previously empty space */}
+          <div className="flex items-center gap-8 pt-8 border-t border-white/10">
+            <div>
+              <p className="text-2xl font-bold">5</p>
+              <p className="text-xs text-white/60">Countries served</p>
+            </div>
+            <div className="w-px h-8 bg-white/15" />
+            <div>
+              <p className="text-2xl font-bold">99.9%</p>
+              <p className="text-xs text-white/60">Uptime SLA</p>
+            </div>
+            <div className="w-px h-8 bg-white/15" />
+            <div>
+              <p className="text-2xl font-bold">24/7</p>
+              <p className="text-xs text-white/60">Support</p>
+            </div>
+          </div>
         </div>
       </aside>
 
