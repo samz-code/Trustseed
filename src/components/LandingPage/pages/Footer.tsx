@@ -137,17 +137,14 @@ export function Footer() {
           </p>
           <div className="flex flex-col sm:flex-row items-center gap-2 sm:gap-4 text-center">
             <a
-              href="https://www.emonisamuel.co.ke"
+              href="#"
               target="_blank"
               rel="noopener noreferrer"
               className="text-sm text-[#1ebcb2] hover:text-white transition-colors whitespace-nowrap"
             >
-              Developed by Emoni Samuel
+              Developed by Managed by Sharmai Technologies
             </a>
-            <span className="hidden sm:inline text-slate-600">|</span>
-            <span className="text-sm text-slate-400 whitespace-nowrap">
-              Managed by Sharmai Technologies
-            </span>
+          
           </div>
         </div>
       </div>
