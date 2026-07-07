@@ -9,8 +9,17 @@ export default defineConfig({
   },
   server: {
     port: 1080,
-    strictPort: true, // fail loudly if 1080 is taken instead of silently using another port
-    open: true,       // auto-open the browser on dev start
-    host: true,       // also expose on your LAN (test from phone via your machine's IP)
+    strictPort: true,
+    open: true,
+    host: true,
+    watch: {
+      ignored: [
+        '**/node_modules/**',
+        '**/.git/**',
+        '**/dist/**',
+        '**/.vite/**',
+        '**/coverage/**',
+      ],
+    },
   },
 });

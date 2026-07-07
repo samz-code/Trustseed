@@ -233,6 +233,22 @@ export type Transaction = {
   completed_at: string | null;
   created_at: string;
   updated_at: string;
+
+  // --- Transactions v2 (migration_transactions_v2.sql) ---------------------
+  // These columns are added by the migration. Optional (`?`) so any existing
+  // code that constructs a Transaction without them still type-checks.
+  /** How the customer funds a deposit / receives a withdrawal. */
+  payment_source?: 'cash' | 'momo' | 'mpesa' | 'bank' | null;
+  /** Target currency for transfers and forex (the currency received). */
+  to_currency?: string | null;
+  /** Charges / commission on an international transfer. */
+  charges?: number | null;
+  /** Branch float account a forex trade settles against (FK -> float_accounts). */
+  float_account_id?: string | null;
+  /** Loan account a disbursement pays out against (FK -> loan_accounts). */
+  loan_account_id?: string | null;
+  /** Free-text approval reference captured at loan disbursement. */
+  approval_reference?: string | null;
 };
 
 export type TransactionType =
@@ -287,4 +303,58 @@ export type User = {
   id: string;
   email: string;
   created_at: string;
+};
+
+// ============================================================================
+// FloatAccount
+// ----------------------------------------------------------------------------
+// Branch float position (cash drawer, MoMo/M-Pesa till, bank, safe, vault),
+// stored in the `float_accounts` table and surfaced on FloatPage. Forex
+// transactions settle against one via `Transaction.float_account_id`.
+// If your project ALREADY exports FloatAccount from another file, delete this
+// block to avoid a duplicate-identifier error. Extra fields are optional so
+// this stays compatible with whatever columns your table actually has.
+// ============================================================================
+export type FloatAccount = {
+  id: string;
+  tenant_id: string;
+  branch_id: string | null;
+  float_type: string;
+  currency: string;
+  balance: number;
+  min_threshold: number | null;
+  max_threshold: number | null;
+  status: 'active' | 'inactive' | 'frozen';
+  created_at: string;
+  updated_at: string;
+};
+
+// ============================================================================
+// LoanAccount
+// ----------------------------------------------------------------------------
+// TransactionsPage needs a LoanAccount type. This is intentionally loose: real
+// loan_accounts columns vary (loan_number vs account_number, principal_amount
+// vs outstanding_balance), so optional fields + an index signature let the
+// page read whatever exists without type errors. If you ALREADY declare
+// LoanAccount elsewhere, delete this block to avoid a duplicate identifier.
+// ============================================================================
+export type LoanAccount = {
+  id: string;
+  tenant_id: string;
+  branch_id?: string | null;
+  customer_id: string;
+  status: string;
+  // Whichever of these your table has:
+  account_number?: string;
+  loan_number?: string;
+  currency?: string;
+  outstanding_balance?: number;
+  current_balance?: number;
+  balance?: number;
+  principal_amount?: number;
+  principal?: number;
+  created_at?: string;
+  updated_at?: string;
+  // Allow any additional columns your table defines.
+  [key: string]: unknown;
 };

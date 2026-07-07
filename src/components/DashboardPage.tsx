@@ -14,6 +14,7 @@ import {
   PiggyBank,
   RefreshCw,
   Receipt,
+  Landmark,
 } from 'lucide-react';
 
 type ChangeType = 'positive' | 'negative' | 'neutral';
@@ -37,6 +38,14 @@ interface RecentTx {
   customerName: string;
 }
 
+// Minimal shape for the float_accounts columns this page reads. Declared
+// explicitly because `float_accounts` isn't in the generated Supabase
+// types yet (see the `as any` cast in loadDashboard).
+interface FloatRow {
+  balance: number;
+  branch_id: string | null;
+}
+
 interface PendingApproval {
   id: string;
   transaction_type: string;
@@ -56,6 +65,8 @@ interface DashboardData {
   loanOutstanding: number;
   savingsCount: number;
   savingsTotal: number;
+  floatTotal: number;
+  floatAccountCount: number;
   recentTransactions: RecentTx[];
   pendingApprovals: PendingApproval[];
 }
@@ -70,6 +81,8 @@ const EMPTY: DashboardData = {
   loanOutstanding: 0,
   savingsCount: 0,
   savingsTotal: 0,
+  floatTotal: 0,
+  floatAccountCount: 0,
   recentTransactions: [],
   pendingApprovals: [],
 };
@@ -181,6 +194,32 @@ export function DashboardPage() {
       if (savingsRes.error) throw savingsRes.error;
       const savings = savingsRes.data ?? [];
       const savingsTotal = savings.reduce((sum, s) => sum + Number(s.balance || 0), 0);
+
+      // --- Float (cash-on-hand across float accounts) ---
+      // Filtered to the tenant's default currency, same convention formatMoney
+      // uses everywhere else on this page. Unlike wallets/savings/loans,
+      // float accounts can be tenant-wide (branch_id IS NULL, e.g. head
+      // office reserves) as well as branch-scoped, so branch-restricted
+      // roles need an OR filter rather than a plain .eq — otherwise
+      // tenant-wide float would silently disappear from their view (same
+      // pattern FloatPage itself uses for `filteredAccounts`).
+      // Cast: `float_accounts` isn't in the generated Supabase types yet,
+      // so without this TypeScript infers `never` for the row shape and
+      // errors on every field access below. Regenerate types once the
+      // table is included, then this cast (and the FloatRow annotation)
+      // can go away.
+      let floatQuery = (supabase.from('float_accounts') as any)
+        .select('balance, branch_id')
+        .eq('tenant_id', tenant!.id)
+        .eq('status', 'active')
+        .eq('currency', defaultCurrency);
+      if (!seesAllBranches && branchId) {
+        floatQuery = floatQuery.or(`branch_id.eq.${branchId},branch_id.is.null`);
+      }
+      const floatRes = await floatQuery;
+      if (floatRes.error) throw floatRes.error;
+      const floatAccounts = (floatRes.data ?? []) as FloatRow[];
+      const floatTotal = floatAccounts.reduce((sum, f) => sum + Number(f.balance || 0), 0);
 
       // --- Today's transactions (deposits/withdrawals totals) ---
       let todayTxQuery = supabase
@@ -294,6 +333,8 @@ export function DashboardPage() {
         loanOutstanding,
         savingsCount: savings.length,
         savingsTotal,
+        floatTotal,
+        floatAccountCount: floatAccounts.length,
         recentTransactions,
         pendingApprovals,
       });
@@ -312,6 +353,10 @@ export function DashboardPage() {
     loadDashboard();
   }, [loadDashboard]);
 
+  // Each card below is assigned a unique color key so no two tiles share a
+  // color. There are exactly 8 stat cards and 8 color keys defined in
+  // `tileClasses` (5 base brand colors + 3 derived tints/shades), so every
+  // key here is used exactly once.
   const stats: StatCard[] = [
     {
       label: 'Total Customers',
@@ -319,7 +364,15 @@ export function DashboardPage() {
       change: 'active',
       changeType: 'neutral',
       icon: <Users className="w-6 h-6" />,
-      color: 'purple',
+      color: 'purple', // #641f60
+    },
+    {
+      label: 'Float Balance',
+      value: formatMoney(data.floatTotal, defaultCurrency),
+      change: `${data.floatAccountCount} account${data.floatAccountCount === 1 ? '' : 's'}`,
+      changeType: 'neutral',
+      icon: <Landmark className="w-6 h-6" />,
+      color: 'orange', // #ee7b22
     },
     {
       label: 'Deposits Today',
@@ -327,7 +380,7 @@ export function DashboardPage() {
       change: 'today',
       changeType: 'positive',
       icon: <ArrowDownRight className="w-6 h-6" />,
-      color: 'teal',
+      color: 'teal', // #1ebcb2
     },
     {
       label: 'Withdrawals Today',
@@ -335,7 +388,7 @@ export function DashboardPage() {
       change: 'today',
       changeType: 'neutral',
       icon: <ArrowUpRight className="w-6 h-6" />,
-      color: 'orange',
+      color: 'mint', // #8dd3cd
     },
     {
       label: 'Active Loans',
@@ -343,7 +396,7 @@ export function DashboardPage() {
       change: `${formatMoney(data.loanOutstanding, defaultCurrency)} outstanding`,
       changeType: 'neutral',
       icon: <Banknote className="w-6 h-6" />,
-      color: 'purple',
+      color: 'deepTeal', // #158f87 (derived from #1ebcb2)
     },
     {
       label: 'Savings Accounts',
@@ -351,7 +404,7 @@ export function DashboardPage() {
       change: `${formatMoney(data.savingsTotal, defaultCurrency)} balance`,
       changeType: 'neutral',
       icon: <PiggyBank className="w-6 h-6" />,
-      color: 'teal',
+      color: 'softOrange', // #f5a361 (derived from #ee7b22)
     },
     {
       label: 'Wallets',
@@ -359,7 +412,7 @@ export function DashboardPage() {
       change: `${formatMoney(data.walletTotal, defaultCurrency)} total`,
       changeType: 'neutral',
       icon: <Wallet className="w-6 h-6" />,
-      color: 'orange',
+      color: 'cloud', // #dcdfe0
     },
     {
       label: 'Expenses (Month)',
@@ -370,15 +423,83 @@ export function DashboardPage() {
           : 'all clear',
       changeType: expenseSummary.pendingCount > 0 ? 'negative' : 'neutral',
       icon: <Receipt className="w-6 h-6" />,
-      color: 'orange',
+      color: 'plum', // #4a1646 (derived from #641f60)
     },
   ];
 
-  const colorClasses = (color: string): { bg: string; text: string } => {
-    const map: Record<string, { bg: string; text: string }> = {
-      purple: { bg: 'bg-[#641f60]/10', text: 'text-[#641f60]' },
-      teal: { bg: 'bg-[#1ebcb2]/10', text: 'text-[#1ebcb2]' },
-      orange: { bg: 'bg-[#ee7b22]/10', text: 'text-[#ee7b22]' },
+  // Every card gets its own distinct color — no repeats. Your 5 given hex
+  // values are used as-is (purple, orange, teal, mint, and the light
+  // #dcdfe0 as a neutral accent), plus 3 tints/shades pulled from the same
+  // brand family (deep teal, soft orange, deep plum) so the remaining
+  // cards stay unique without introducing outside colors.
+  const tileClasses = (
+    color: string
+  ): { accent: string; iconBg: string; iconText: string; chipBg: string; chipText: string } => {
+    const map: Record<
+      string,
+      { accent: string; iconBg: string; iconText: string; chipBg: string; chipText: string }
+    > = {
+      purple: {
+        accent: 'bg-[#641f60]',
+        iconBg: 'bg-[#641f60]/10',
+        iconText: 'text-[#641f60]',
+        chipBg: 'bg-[#641f60]/10',
+        chipText: 'text-[#641f60]',
+      },
+      orange: {
+        accent: 'bg-[#ee7b22]',
+        iconBg: 'bg-[#ee7b22]/10',
+        iconText: 'text-[#ee7b22]',
+        chipBg: 'bg-[#ee7b22]/10',
+        chipText: 'text-[#ee7b22]',
+      },
+      teal: {
+        accent: 'bg-[#1ebcb2]',
+        iconBg: 'bg-[#1ebcb2]/10',
+        iconText: 'text-[#1ebcb2]',
+        chipBg: 'bg-[#1ebcb2]/10',
+        chipText: 'text-[#1ebcb2]',
+      },
+      mint: {
+        accent: 'bg-[#8dd3cd]',
+        iconBg: 'bg-[#8dd3cd]/25',
+        iconText: 'text-[#158f87]',
+        chipBg: 'bg-[#8dd3cd]/25',
+        chipText: 'text-[#158f87]',
+      },
+      // Your neutral #dcdfe0 as its own accent — dark purple text/icon for
+      // contrast since the base tone itself is very light.
+      cloud: {
+        accent: 'bg-[#dcdfe0]',
+        iconBg: 'bg-[#dcdfe0]',
+        iconText: 'text-[#641f60]',
+        chipBg: 'bg-[#dcdfe0]',
+        chipText: 'text-[#641f60]',
+      },
+      // Derived shade: deep teal.
+      deepTeal: {
+        accent: 'bg-[#158f87]',
+        iconBg: 'bg-[#158f87]/10',
+        iconText: 'text-[#158f87]',
+        chipBg: 'bg-[#158f87]/10',
+        chipText: 'text-[#158f87]',
+      },
+      // Derived shade: soft/light orange.
+      softOrange: {
+        accent: 'bg-[#f5a361]',
+        iconBg: 'bg-[#f5a361]/25',
+        iconText: 'text-[#c46b1f]',
+        chipBg: 'bg-[#f5a361]/25',
+        chipText: 'text-[#c46b1f]',
+      },
+      // Derived shade: deep plum.
+      plum: {
+        accent: 'bg-[#4a1646]',
+        iconBg: 'bg-[#4a1646]/10',
+        iconText: 'text-[#4a1646]',
+        chipBg: 'bg-[#4a1646]/10',
+        chipText: 'text-[#4a1646]',
+      },
     };
     return map[color] || map.purple;
   };
@@ -446,50 +567,60 @@ export function DashboardPage() {
         </div>
       )}
 
-      {/* Stats */}
-      <div className="grid sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-7 gap-4">
+      {/* Stats — white cards, colored accent per card, bold figures */}
+      <div className="grid sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-5">
         {loading
-          ? Array.from({ length: 7 }).map((_, idx) => (
-              <div key={idx} className="bg-white rounded-xl border border-slate-200 p-5 animate-pulse">
-                <div className="w-10 h-10 rounded-lg bg-slate-200 mb-3" />
-                <div className="h-7 w-20 bg-slate-200 rounded mb-2" />
-                <div className="h-4 w-24 bg-slate-100 rounded" />
+          ? Array.from({ length: 8 }).map((_, idx) => (
+              <div key={idx} className="rounded-2xl p-6 bg-white border border-[#dcdfe0] animate-pulse">
+                <div className="w-11 h-11 rounded-xl bg-slate-200 mb-6" />
+                <div className="h-8 w-24 bg-slate-200 rounded mb-2" />
+                <div className="h-4 w-28 bg-slate-100 rounded" />
               </div>
             ))
           : stats.map((stat, idx) => {
-              const c = colorClasses(stat.color);
+              const t = tileClasses(stat.color);
+              const clickable = stat.label === 'Expenses (Month)' || stat.label === 'Float Balance';
               return (
                 <div
                   key={idx}
                   onClick={() => {
                     if (stat.label === 'Expenses (Month)') {
                       window.dispatchEvent(new CustomEvent('navigate', { detail: 'expenses' }));
+                    } else if (stat.label === 'Float Balance') {
+                      window.dispatchEvent(new CustomEvent('navigate', { detail: 'float' }));
                     }
                   }}
-                  className={`bg-white rounded-xl border border-slate-200 p-5 hover:shadow-lg transition-shadow ${
-                    stat.label === 'Expenses (Month)' ? 'cursor-pointer' : ''
+                  className={`relative overflow-hidden rounded-2xl bg-white border border-[#dcdfe0] pl-6 pr-6 py-6 transition-all duration-200 hover:-translate-y-1 hover:shadow-lg ${
+                    clickable ? 'cursor-pointer' : ''
                   }`}
                 >
-                  <div className="flex items-center justify-between mb-3">
-                    <div className={`p-2.5 rounded-lg ${c.bg}`}>
-                      <span className={c.text}>{stat.icon}</span>
+                  {/* Colored accent bar identifies the card without tinting the whole background */}
+                  <div className={`absolute left-0 top-0 h-full w-1.5 ${t.accent}`} />
+
+                  <div className="flex items-start justify-between mb-6">
+                    <div className={`w-11 h-11 rounded-xl ${t.iconBg} flex items-center justify-center`}>
+                      <span className={t.iconText}>{stat.icon}</span>
                     </div>
                     <span
-                      className={`text-xs font-medium px-2 py-1 rounded-full ${
+                      className={`text-[11px] font-semibold px-2.5 py-1 rounded-full ${
                         stat.changeType === 'negative'
                           ? 'bg-[#c46040]/10 text-[#c46040]'
-                          : 'bg-slate-100 text-slate-600'
+                          : `${t.chipBg} ${t.chipText}`
                       }`}
                     >
                       {stat.change}
                     </span>
                   </div>
-                  <h3 className="text-2xl font-bold text-slate-900 truncate">{stat.value}</h3>
-                  <p className="text-sm text-slate-500 mt-1">{stat.label}</p>
+
+                  <p className="text-3xl font-extrabold tracking-tight leading-none text-slate-900 truncate">
+                    {stat.value}
+                  </p>
+                  <p className="text-sm font-medium text-slate-500 mt-2">{stat.label}</p>
                 </div>
               );
             })}
       </div>
+
 
       {/* Recent + approvals */}
       <div className="grid lg:grid-cols-3 gap-6">

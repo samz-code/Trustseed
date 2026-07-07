@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { supabase } from '../lib/supabase';
 import type { TenantAdmin } from '../types';
@@ -20,6 +20,7 @@ import {
   Link as LinkIcon,
   CheckCircle2,
   ShieldAlert,
+  ChevronDown,
 } from 'lucide-react';
 
 interface IntegrationField {
@@ -91,6 +92,269 @@ const INTEGRATIONS: IntegrationDef[] = [
 const CURRENCY_OPTIONS = ['KES', 'USD', 'SSP', 'UGX', 'TZS', 'RWF', 'EUR', 'GBP', 'NGN'].filter(
   (c) => c in CURRENCY_SYMBOLS
 );
+
+// ============================================================================
+// Flag-badge currency picker (matches the style used on the Transactions
+// page) — real national flags as inline SVG, clipped to a circle. Kept in
+// this file rather than a native <select> so every currency dropdown in the
+// app (Transactions, Settings) looks and behaves the same way. Covers every
+// code in CURRENCY_OPTIONS, including RWF and NGN which Transactions doesn't
+// need.
+// ============================================================================
+
+function FlagGraphic({ code }: { code: string }) {
+  switch (code) {
+    case 'USD': // United States
+      return (
+        <>
+          <rect width="40" height="40" fill="#b22234" />
+          <rect y="3.08" width="40" height="3.08" fill="#fff" />
+          <rect y="9.23" width="40" height="3.08" fill="#fff" />
+          <rect y="15.38" width="40" height="3.08" fill="#fff" />
+          <rect y="21.54" width="40" height="3.08" fill="#fff" />
+          <rect y="27.69" width="40" height="3.08" fill="#fff" />
+          <rect y="33.85" width="40" height="3.08" fill="#fff" />
+          <rect width="18" height="21.54" fill="#3c3b6e" />
+          <g fill="#fff">
+            {[4, 10, 16].map((y) =>
+              [3, 7, 11, 15].map((x) => <circle key={`${x}-${y}`} cx={x} cy={y} r="1" />)
+            )}
+          </g>
+        </>
+      );
+    case 'KES': // Kenya
+      return (
+        <>
+          <rect width="40" height="10" fill="#000" />
+          <rect y="10" width="40" height="4" fill="#fff" />
+          <rect y="14" width="40" height="12" fill="#bb0000" />
+          <rect y="26" width="40" height="4" fill="#fff" />
+          <rect y="30" width="40" height="10" fill="#006600" />
+          <ellipse cx="20" cy="20" rx="4.5" ry="8" fill="#fff" />
+          <ellipse cx="20" cy="20" rx="3" ry="6.5" fill="#bb0000" />
+          <path d="M20 11 L21.5 20 L20 29 L18.5 20 Z" fill="#000" />
+        </>
+      );
+    case 'SSP': // South Sudan
+      return (
+        <>
+          <rect width="40" height="12" fill="#000" />
+          <rect y="12" width="40" height="2" fill="#fff" />
+          <rect y="14" width="40" height="12" fill="#bb0000" />
+          <rect y="26" width="40" height="2" fill="#fff" />
+          <rect y="28" width="40" height="12" fill="#009543" />
+          <path d="M0 0 L20 20 L0 40 Z" fill="#0f47af" />
+          <path d="M4 20 l5.5 -1.8 -3.4 4.7 0 -5.8 3.4 4.7 z" fill="#fcdd09" />
+        </>
+      );
+    case 'UGX': // Uganda
+      return (
+        <>
+          <rect width="40" height="6.67" fill="#000" />
+          <rect y="6.67" width="40" height="6.67" fill="#fcdc04" />
+          <rect y="13.33" width="40" height="6.67" fill="#d90000" />
+          <rect y="20" width="40" height="6.67" fill="#000" />
+          <rect y="26.67" width="40" height="6.67" fill="#fcdc04" />
+          <rect y="33.33" width="40" height="6.67" fill="#d90000" />
+          <circle cx="20" cy="20" r="6" fill="#fff" />
+          <circle cx="20" cy="20" r="5.4" fill="none" stroke="#000" strokeWidth="0.4" />
+        </>
+      );
+    case 'TZS': // Tanzania
+      return (
+        <>
+          <path d="M0 0 H40 V40 H0 Z" fill="#1eb53a" />
+          <path d="M40 0 V40 H0 Z" fill="#00a3dd" />
+          <path d="M0 40 L40 0v6 L6 40 Z" fill="#fcd116" />
+          <path d="M0 40 L40 0h-6 L0 34 Z" fill="#fcd116" />
+          <path d="M0 34 L34 0h-34 Z M40 6 L6 40h34 Z" fill="#000" />
+        </>
+      );
+    case 'RWF': // Rwanda
+      return (
+        <>
+          <rect width="40" height="40" fill="#20603d" />
+          <rect y="0" width="40" height="24" fill="#00a1de" />
+          <rect y="24" width="40" height="4" fill="#fad201" />
+          <rect y="28" width="40" height="12" fill="#20603d" />
+          {/* Sun with simple rays, upper-right of the blue field */}
+          <g fill="#e5be01">
+            {Array.from({ length: 24 }).map((_, i) => {
+              const angle = (i * 15 * Math.PI) / 180;
+              const x1 = 29 + 4.5 * Math.cos(angle);
+              const y1 = 11 + 4.5 * Math.sin(angle);
+              const x2 = 29 + 7.5 * Math.cos(angle);
+              const y2 = 11 + 7.5 * Math.sin(angle);
+              return <line key={i} x1={x1} y1={y1} x2={x2} y2={y2} stroke="#e5be01" strokeWidth="1.2" />;
+            })}
+            <circle cx="29" cy="11" r="4.5" />
+          </g>
+        </>
+      );
+    case 'NGN': // Nigeria
+      return (
+        <>
+          <rect width="13.33" height="40" fill="#008751" />
+          <rect x="13.33" width="13.34" height="40" fill="#fff" />
+          <rect x="26.67" width="13.33" height="40" fill="#008751" />
+        </>
+      );
+    case 'EUR': // European Union
+      return (
+        <>
+          <rect width="40" height="40" fill="#003399" />
+          <g fill="#ffcc00">
+            {Array.from({ length: 12 }).map((_, i) => {
+              const angle = (i * 30 * Math.PI) / 180;
+              const cx = 20 + 11 * Math.sin(angle);
+              const cy = 20 - 11 * Math.cos(angle);
+              return <circle key={i} cx={cx} cy={cy} r="1.6" />;
+            })}
+          </g>
+        </>
+      );
+    case 'GBP': // United Kingdom
+      return (
+        <>
+          <rect width="40" height="40" fill="#012169" />
+          <path d="M0 0 L40 40 M40 0 L0 40" stroke="#fff" strokeWidth="6" />
+          <path d="M0 0 L40 40 M40 0 L0 40" stroke="#c8102e" strokeWidth="3" />
+          <path d="M20 0 V40 M0 20 H40" stroke="#fff" strokeWidth="10" />
+          <path d="M20 0 V40 M0 20 H40" stroke="#c8102e" strokeWidth="6" />
+        </>
+      );
+    default:
+      return (
+        <>
+          <rect width="40" height="40" fill="#64748b" />
+          <text
+            x="20"
+            y="21"
+            textAnchor="middle"
+            dominantBaseline="central"
+            fontSize="14"
+            fontWeight="700"
+            fill="#fff"
+            fontFamily="system-ui, sans-serif"
+          >
+            {code.slice(0, 2)}
+          </text>
+        </>
+      );
+  }
+}
+
+// A round flag badge for a currency. Clips the flag SVG to a circle and adds a
+// thin ring so light-colored flags stay visible on white backgrounds.
+function CurrencyBadge({ code, size = 22 }: { code: string; size?: number }) {
+  const clipId = `settings-flag-clip-${code}`;
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 40 40"
+      role="img"
+      aria-label={`${code} flag`}
+      className="flex-shrink-0"
+    >
+      <defs>
+        <clipPath id={clipId}>
+          <circle cx="20" cy="20" r="20" />
+        </clipPath>
+      </defs>
+      <g clipPath={`url(#${clipId})`}>
+        <FlagGraphic code={code} />
+      </g>
+      <circle cx="20" cy="20" r="19" fill="none" stroke="#00000022" strokeWidth="2" />
+    </svg>
+  );
+}
+
+const CURRENCY_NAMES: Record<string, string> = {
+  USD: 'US Dollar',
+  KES: 'Kenyan Shilling',
+  SSP: 'South Sudanese Pound',
+  UGX: 'Ugandan Shilling',
+  TZS: 'Tanzanian Shilling',
+  RWF: 'Rwandan Franc',
+  EUR: 'Euro',
+  GBP: 'British Pound',
+  NGN: 'Nigerian Naira',
+};
+
+// Flag-badge currency dropdown. Drop-in replacement for a native <select>
+// wherever a currency needs picking — fully keyboard/click accessible, and
+// responsive (currency name collapses on narrow screens, flag + code always
+// show). `options` lets callers scope which currencies are offered.
+function CurrencySelect({
+  value,
+  onChange,
+  options = CURRENCY_OPTIONS,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  options?: string[];
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  return (
+    <div className="relative w-full" ref={ref}>
+      <button
+        type="button"
+        onClick={() => setOpen((p) => !p)}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        className="w-full flex items-center gap-2 pl-3 pr-3 py-2.5 border border-slate-300 rounded-lg bg-white text-left hover:border-slate-400 focus:outline-none focus:ring-2 focus:ring-[#1ebcb2] transition-colors"
+      >
+        <CurrencyBadge code={value} />
+        <span className="flex-1 min-w-0 truncate text-slate-900">
+          <span className="font-medium">{value}</span>
+          {CURRENCY_SYMBOLS[value] && <span className="text-slate-400"> ({CURRENCY_SYMBOLS[value]})</span>}
+          <span className="hidden sm:inline text-slate-400"> · {CURRENCY_NAMES[value] || value}</span>
+        </span>
+        <ChevronDown className="w-4 h-4 text-slate-400 flex-shrink-0" />
+      </button>
+
+      {open && (
+        <div
+          role="listbox"
+          className="absolute z-30 mt-1 w-full bg-white border border-slate-200 rounded-lg shadow-lg max-h-60 overflow-y-auto"
+        >
+          {options.map((c) => (
+            <button
+              key={c}
+              type="button"
+              role="option"
+              aria-selected={c === value}
+              onClick={() => {
+                onChange(c);
+                setOpen(false);
+              }}
+              className={`w-full flex items-center gap-2 px-3 py-2 text-left text-sm hover:bg-slate-50 transition-colors ${
+                c === value ? 'bg-[#1ebcb2]/10' : ''
+              }`}
+            >
+              <CurrencyBadge code={c} size={20} />
+              <span className={`flex-shrink-0 ${c === value ? 'text-[#641f60] font-medium' : 'text-slate-700'}`}>
+                {c} {CURRENCY_SYMBOLS[c] ? `(${CURRENCY_SYMBOLS[c]})` : ''}
+              </span>
+              <span className="text-slate-400 truncate">{CURRENCY_NAMES[c] || ''}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 interface SettingsPageProps {
   tab?: string;
@@ -527,17 +791,10 @@ export function SettingsPage({ tab = 'general' }: SettingsPageProps) {
                 <label className="block text-sm font-medium text-slate-700 mb-1">
                   Default Currency
                 </label>
-                <select
+                <CurrencySelect
                   value={formData.default_currency}
-                  onChange={e => setFormData({ ...formData, default_currency: e.target.value })}
-                  className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#1ebcb2]"
-                >
-                  {CURRENCY_OPTIONS.map((code) => (
-                    <option key={code} value={code}>
-                      {code} ({CURRENCY_SYMBOLS[code]})
-                    </option>
-                  ))}
-                </select>
+                  onChange={(v) => setFormData({ ...formData, default_currency: v })}
+                />
                 <p className="text-xs text-slate-400 mt-1">
                   Used as the display currency across dashboards and reports.
                 </p>
@@ -898,10 +1155,10 @@ export function SettingsPage({ tab = 'general' }: SettingsPageProps) {
 
       {/* Create Branch modal */}
       {showBranchForm && (
-        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full">
-            <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between">
-              <h2 className="text-xl font-bold text-[#641f60]">Add Branch</h2>
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-stretch sm:items-center justify-center p-0 sm:p-4">
+          <div className="bg-white w-full sm:max-w-md sm:rounded-2xl shadow-2xl flex flex-col h-full sm:h-auto sm:max-h-[90vh] overflow-hidden">
+            <div className="px-4 sm:px-6 py-4 border-b border-slate-200 flex items-center justify-between flex-shrink-0">
+              <h2 className="text-lg sm:text-xl font-bold text-[#641f60]">Add Branch</h2>
               <button
                 onClick={closeBranchForm}
                 className="p-2 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition-colors"
@@ -911,7 +1168,11 @@ export function SettingsPage({ tab = 'general' }: SettingsPageProps) {
               </button>
             </div>
 
-            <form onSubmit={handleCreateBranch} className="p-6 space-y-4">
+            <form
+              id="add-branch-form"
+              onSubmit={handleCreateBranch}
+              className="flex-1 overflow-y-auto overscroll-contain px-4 sm:px-6 py-5 space-y-4"
+            >
               <div>
                 <label className="block text-sm font-medium text-slate-700 mb-1">Branch Name *</label>
                 <input
@@ -949,19 +1210,10 @@ export function SettingsPage({ tab = 'general' }: SettingsPageProps) {
 
               <div>
                 <label className="block text-sm font-medium text-slate-700 mb-1">Operating Currency</label>
-                <select
+                <CurrencySelect
                   value={branchFormData.operating_currency}
-                  onChange={(e) =>
-                    setBranchFormData((prev) => ({ ...prev, operating_currency: e.target.value }))
-                  }
-                  className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#1ebcb2] focus:border-transparent"
-                >
-                  {CURRENCY_OPTIONS.map((code) => (
-                    <option key={code} value={code}>
-                      {code} ({CURRENCY_SYMBOLS[code]})
-                    </option>
-                  ))}
-                </select>
+                  onChange={(v) => setBranchFormData((prev) => ({ ...prev, operating_currency: v }))}
+                />
               </div>
 
               {branchFormError && (
@@ -969,44 +1221,45 @@ export function SettingsPage({ tab = 'general' }: SettingsPageProps) {
                   {branchFormError}
                 </div>
               )}
-
-              <div className="flex items-center justify-end gap-3 pt-2">
-                <button
-                  type="button"
-                  onClick={closeBranchForm}
-                  className="px-4 py-2.5 border border-slate-300 text-slate-700 font-medium rounded-lg hover:bg-slate-50 transition-colors"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={branchSubmitting}
-                  className="px-6 py-2.5 bg-[#1ebcb2] hover:bg-[#159089] text-white font-medium rounded-lg shadow-lg disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 transition-all"
-                >
-                  {branchSubmitting ? (
-                    <>
-                      <Loader2 className="w-5 h-5 animate-spin" />
-                      Creating...
-                    </>
-                  ) : (
-                    <>
-                      <Plus className="w-5 h-5" />
-                      Create Branch
-                    </>
-                  )}
-                </button>
-              </div>
             </form>
+
+            <div className="flex flex-col-reverse sm:flex-row items-stretch sm:items-center sm:justify-end gap-3 px-4 sm:px-6 py-4 border-t border-slate-200 flex-shrink-0 bg-white">
+              <button
+                type="button"
+                onClick={closeBranchForm}
+                className="px-4 py-2.5 border border-slate-300 text-slate-700 font-medium rounded-lg hover:bg-slate-50 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                form="add-branch-form"
+                disabled={branchSubmitting}
+                className="px-6 py-2.5 bg-[#1ebcb2] hover:bg-[#159089] text-white font-medium rounded-lg shadow-lg disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 transition-all"
+              >
+                {branchSubmitting ? (
+                  <>
+                    <Loader2 className="w-5 h-5 animate-spin" />
+                    Creating...
+                  </>
+                ) : (
+                  <>
+                    <Plus className="w-5 h-5" />
+                    Create Branch
+                  </>
+                )}
+              </button>
+            </div>
           </div>
         </div>
       )}
 
       {/* Configure Integration modal */}
       {activeIntegration && (
-        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full">
-            <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between">
-              <h2 className="text-xl font-bold text-[#641f60]">
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-stretch sm:items-center justify-center p-0 sm:p-4">
+          <div className="bg-white w-full sm:max-w-md sm:rounded-2xl shadow-2xl flex flex-col h-full sm:h-auto sm:max-h-[90vh] overflow-hidden">
+            <div className="px-4 sm:px-6 py-4 border-b border-slate-200 flex items-center justify-between flex-shrink-0">
+              <h2 className="text-lg sm:text-xl font-bold text-[#641f60]">
                 Configure {activeIntegration.label}
               </h2>
               <button
@@ -1018,7 +1271,11 @@ export function SettingsPage({ tab = 'general' }: SettingsPageProps) {
               </button>
             </div>
 
-            <form onSubmit={handleSaveIntegration} className="p-6 space-y-4">
+            <form
+              id="configure-integration-form"
+              onSubmit={handleSaveIntegration}
+              className="flex-1 overflow-y-auto overscroll-contain px-4 sm:px-6 py-5 space-y-4"
+            >
               {activeIntegration.fields.map((field) => (
                 <div key={field.key}>
                   <label className="block text-sm font-medium text-slate-700 mb-1">
@@ -1060,34 +1317,35 @@ export function SettingsPage({ tab = 'general' }: SettingsPageProps) {
                   {integrationError}
                 </div>
               )}
-
-              <div className="flex items-center justify-end gap-3 pt-2">
-                <button
-                  type="button"
-                  onClick={closeIntegrationForm}
-                  className="px-4 py-2.5 border border-slate-300 text-slate-700 font-medium rounded-lg hover:bg-slate-50 transition-colors"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={integrationSaving}
-                  className="px-6 py-2.5 bg-[#1ebcb2] hover:bg-[#159089] text-white font-medium rounded-lg shadow-lg disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 transition-all"
-                >
-                  {integrationSaving ? (
-                    <>
-                      <Loader2 className="w-5 h-5 animate-spin" />
-                      Saving...
-                    </>
-                  ) : (
-                    <>
-                      <Save className="w-5 h-5" />
-                      Save
-                    </>
-                  )}
-                </button>
-              </div>
             </form>
+
+            <div className="flex flex-col-reverse sm:flex-row items-stretch sm:items-center sm:justify-end gap-3 px-4 sm:px-6 py-4 border-t border-slate-200 flex-shrink-0 bg-white">
+              <button
+                type="button"
+                onClick={closeIntegrationForm}
+                className="px-4 py-2.5 border border-slate-300 text-slate-700 font-medium rounded-lg hover:bg-slate-50 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                form="configure-integration-form"
+                disabled={integrationSaving}
+                className="px-6 py-2.5 bg-[#1ebcb2] hover:bg-[#159089] text-white font-medium rounded-lg shadow-lg disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 transition-all"
+              >
+                {integrationSaving ? (
+                  <>
+                    <Loader2 className="w-5 h-5 animate-spin" />
+                    Saving...
+                  </>
+                ) : (
+                  <>
+                    <Save className="w-5 h-5" />
+                    Save
+                  </>
+                )}
+              </button>
+            </div>
           </div>
         </div>
       )}

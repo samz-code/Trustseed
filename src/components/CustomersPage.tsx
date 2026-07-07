@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { supabase } from '../lib/supabase';
 import type { InsertTables } from '../lib/supabase';
@@ -29,9 +29,65 @@ import {
   Calendar,
   BadgeCheck,
   ShieldAlert,
+  Upload,
+  FileText,
+  Trash2,
+  ExternalLink,
 } from 'lucide-react';
 
 type CustomerType = 'individual' | 'business' | 'organization';
+
+// ---- Identification documents ---------------------------------------------
+
+type DocSlot = 'id_front' | 'id_back' | 'proof_of_address' | 'photo';
+
+interface DocSlotConfig {
+  key: DocSlot;
+  label: string;
+  hint: string;
+}
+
+const DOC_SLOTS: DocSlotConfig[] = [
+  { key: 'id_front', label: 'ID Front', hint: 'Front of national ID, passport, or license' },
+  { key: 'id_back', label: 'ID Back', hint: 'Back of the ID (if applicable)' },
+  { key: 'proof_of_address', label: 'Proof of Address', hint: 'Utility bill or bank statement, last 3 months' },
+  { key: 'photo', label: 'Passport Photo', hint: 'Clear, recent photo of the customer' },
+];
+
+const ALLOWED_DOC_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'];
+const MAX_DOC_SIZE = 5 * 1024 * 1024; // 5MB
+
+interface UploadedDocument {
+  name: string;
+  url: string;
+  path: string;
+  size: number;
+  uploaded_at: string;
+}
+
+function isImageDoc(doc: { url: string; name: string }): boolean {
+  return /\.(jpe?g|png|webp|gif)$/i.test(doc.name) || /\.(jpe?g|png|webp|gif)$/i.test(doc.url);
+}
+
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function getCustomerDocuments(c: Customer | null): Partial<Record<DocSlot, UploadedDocument>> {
+  if (!c) return {};
+  const meta =
+    c.metadata && typeof c.metadata === 'object' && !Array.isArray(c.metadata)
+      ? (c.metadata as Record<string, unknown>)
+      : {};
+  const docs = meta.documents;
+  return docs && typeof docs === 'object' && !Array.isArray(docs)
+    ? (docs as Partial<Record<DocSlot, UploadedDocument>>)
+    : {};
+}
+
+// ---- Form -------------------------------------------------------------
 
 interface CustomerForm {
   customer_type: CustomerType;
@@ -46,6 +102,12 @@ interface CustomerForm {
   id_type: string;
   id_number: string;
   id_expiry: string;
+  date_of_birth: string;
+  nationality: string;
+  gender: string;
+  occupation: string;
+  source_of_funds: string;
+  is_pep: boolean;
 }
 
 const EMPTY_FORM: CustomerForm = {
@@ -61,6 +123,12 @@ const EMPTY_FORM: CustomerForm = {
   id_type: '',
   id_number: '',
   id_expiry: '',
+  date_of_birth: '',
+  nationality: '',
+  gender: '',
+  occupation: '',
+  source_of_funds: '',
+  is_pep: false,
 };
 
 function customerDisplayName(c: Customer): string {
@@ -88,6 +156,15 @@ export function CustomersPage() {
   const [formData, setFormData] = useState<CustomerForm>(EMPTY_FORM);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Identification documents (form state)
+  const [pendingFiles, setPendingFiles] = useState<Partial<Record<DocSlot, File>>>({});
+  const [previewUrls, setPreviewUrls] = useState<Partial<Record<DocSlot, string>>>({});
+  const [savedDocuments, setSavedDocuments] = useState<Partial<Record<DocSlot, UploadedDocument>>>({});
+  const [removedSlots, setRemovedSlots] = useState<Set<DocSlot>>(new Set());
+  const [docErrors, setDocErrors] = useState<Partial<Record<DocSlot, string>>>({});
+  const [docUploading, setDocUploading] = useState(false);
+  const fileInputRefs = useRef<Partial<Record<DocSlot, HTMLInputElement | null>>>({});
 
   // Detail / KYC review modal
   const [detailCustomer, setDetailCustomer] = useState<Customer | null>(null);
@@ -146,6 +223,14 @@ export function CustomersPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [customers]);
 
+  // Revoke any local object URLs on unmount so we don't leak memory.
+  useEffect(() => {
+    return () => {
+      Object.values(previewUrls).forEach((url) => url && URL.revokeObjectURL(url));
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const filteredCustomers = customers.filter((c) => {
     const q = searchQuery.trim().toLowerCase();
     const matchesSearch =
@@ -165,6 +250,7 @@ export function CustomersPage() {
     if (formData.customer_type === 'individual') {
       if (!formData.first_name.trim()) return 'First name is required.';
       if (!formData.last_name.trim()) return 'Last name is required.';
+      if (!formData.date_of_birth) return 'Date of birth is required.';
     } else {
       if (!formData.business_name.trim()) return 'Business/organization name is required.';
     }
@@ -172,17 +258,133 @@ export function CustomersPage() {
     if (formData.email.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(formData.email.trim())) {
       return 'Please enter a valid email address.';
     }
+    if (!formData.id_type) return 'ID type is required.';
+    if (!formData.id_number.trim()) return 'ID number is required.';
     return null;
+  };
+
+  // ---- Document handling ---------------------------------------------------
+
+  const resetDocumentState = () => {
+    Object.values(previewUrls).forEach((url) => url && URL.revokeObjectURL(url));
+    setPendingFiles({});
+    setPreviewUrls({});
+    setSavedDocuments({});
+    setRemovedSlots(new Set());
+    setDocErrors({});
+  };
+
+  const handleFileSelect = (slot: DocSlot, file: File | undefined) => {
+    if (!file) return;
+    setDocErrors((prev) => ({ ...prev, [slot]: undefined }));
+
+    if (!ALLOWED_DOC_TYPES.includes(file.type)) {
+      setDocErrors((prev) => ({ ...prev, [slot]: 'Only JPG, PNG, WEBP, or PDF files are allowed.' }));
+      return;
+    }
+    if (file.size > MAX_DOC_SIZE) {
+      setDocErrors((prev) => ({ ...prev, [slot]: 'File must be smaller than 5MB.' }));
+      return;
+    }
+
+    setPendingFiles((prev) => ({ ...prev, [slot]: file }));
+    setRemovedSlots((prev) => {
+      const next = new Set(prev);
+      next.delete(slot);
+      return next;
+    });
+
+    setPreviewUrls((prev) => {
+      const next = { ...prev };
+      if (next[slot]) URL.revokeObjectURL(next[slot]!);
+      if (file.type.startsWith('image/')) {
+        next[slot] = URL.createObjectURL(file);
+      } else {
+        delete next[slot];
+      }
+      return next;
+    });
+  };
+
+  const clearDocumentSlot = (slot: DocSlot) => {
+    setPendingFiles((prev) => {
+      const next = { ...prev };
+      delete next[slot];
+      return next;
+    });
+    setPreviewUrls((prev) => {
+      const url = prev[slot];
+      if (url) URL.revokeObjectURL(url);
+      const next = { ...prev };
+      delete next[slot];
+      return next;
+    });
+    if (savedDocuments[slot]) {
+      setRemovedSlots((prev) => new Set(prev).add(slot));
+    }
+    setDocErrors((prev) => ({ ...prev, [slot]: undefined }));
+    const input = fileInputRefs.current[slot];
+    if (input) input.value = '';
+  };
+
+  // Uploads any newly-selected files and applies any removals, returning the
+  // merged documents map to persist on the customer's metadata. Runs only
+  // once we have a real customer id (new customers are inserted first).
+  const uploadDocuments = async (
+    customerId: string
+  ): Promise<Partial<Record<DocSlot, UploadedDocument>>> => {
+    if (!tenant) throw new Error('No institution context found.');
+    const results: Partial<Record<DocSlot, UploadedDocument>> = { ...savedDocuments };
+
+    for (const slot of removedSlots) {
+      const existing = savedDocuments[slot];
+      if (existing?.path) {
+        await supabase.storage.from('customer-documents').remove([existing.path]).catch(() => {
+          // Best-effort: don't let a storage hiccup block saving the customer.
+        });
+      }
+      delete results[slot];
+    }
+
+    const entries = Object.entries(pendingFiles) as [DocSlot, File][];
+    for (const [slot, file] of entries) {
+      const ext = file.name.split('.').pop() || 'bin';
+      const path = `${tenant.id}/${customerId}/${slot}-${Date.now()}.${ext}`;
+      const { error: uploadError } = await supabase.storage
+        .from('customer-documents')
+        .upload(path, file, { upsert: true });
+      if (uploadError) throw uploadError;
+      const { data: publicUrlData } = supabase.storage.from('customer-documents').getPublicUrl(path);
+      results[slot] = {
+        name: file.name,
+        url: publicUrlData.publicUrl,
+        path,
+        size: file.size,
+        uploaded_at: new Date().toISOString(),
+      };
+    }
+
+    return results;
   };
 
   const openCreateForm = () => {
     setEditingCustomer(null);
     setFormData(EMPTY_FORM);
     setError(null);
+    resetDocumentState();
     setShowForm(true);
   };
 
   const openEditForm = (customer: Customer) => {
+    const meta =
+      customer.metadata && typeof customer.metadata === 'object' && !Array.isArray(customer.metadata)
+        ? (customer.metadata as Record<string, unknown>)
+        : {};
+    const compliance =
+      meta.compliance && typeof meta.compliance === 'object' && !Array.isArray(meta.compliance)
+        ? (meta.compliance as Record<string, unknown>)
+        : {};
+
     setEditingCustomer(customer);
     setFormData({
       customer_type: customer.customer_type,
@@ -197,8 +399,16 @@ export function CustomersPage() {
       id_type: customer.id_type ?? '',
       id_number: customer.id_number ?? '',
       id_expiry: customer.id_expiry ? customer.id_expiry.slice(0, 10) : '',
+      date_of_birth: customer.date_of_birth ? customer.date_of_birth.slice(0, 10) : '',
+      nationality: customer.nationality ?? '',
+      gender: typeof compliance.gender === 'string' ? compliance.gender : '',
+      occupation: typeof compliance.occupation === 'string' ? compliance.occupation : '',
+      source_of_funds: typeof compliance.source_of_funds === 'string' ? compliance.source_of_funds : '',
+      is_pep: compliance.is_pep === true,
     });
     setError(null);
+    resetDocumentState();
+    setSavedDocuments(getCustomerDocuments(customer));
     setShowForm(true);
   };
 
@@ -207,6 +417,7 @@ export function CustomersPage() {
     setEditingCustomer(null);
     setFormData(EMPTY_FORM);
     setError(null);
+    resetDocumentState();
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -227,11 +438,28 @@ export function CustomersPage() {
     setSubmitting(true);
     try {
       const trimmedEmail = formData.email.trim();
+      // date_of_birth and nationality are real columns on `customers`, so they
+      // go in the main insert/update payload below. The remaining fields have
+      // no dedicated columns yet, so they live under metadata.compliance.
+      const compliance = {
+        gender: formData.gender || null,
+        occupation: formData.occupation.trim() || null,
+        source_of_funds: formData.source_of_funds || null,
+        is_pep: formData.is_pep,
+      };
+
+      let customerId: string;
 
       if (editingCustomer) {
         // UPDATE existing customer. Do not touch KYC/AML/status here; those are
         // managed through the review modal so an edit can't silently re-open a
         // verified record.
+        const existingMeta =
+          editingCustomer.metadata &&
+          typeof editingCustomer.metadata === 'object' &&
+          !Array.isArray(editingCustomer.metadata)
+            ? (editingCustomer.metadata as Record<string, unknown>)
+            : {};
         const { error: updateError } = await supabase
           .from('customers')
           .update({
@@ -247,10 +475,14 @@ export function CustomersPage() {
             id_type: formData.id_type || null,
             id_number: formData.id_number.trim() || null,
             id_expiry: formData.id_expiry || null,
+            date_of_birth: formData.date_of_birth || null,
+            nationality: formData.nationality.trim() || null,
+            metadata: { ...existingMeta, compliance },
           })
           .eq('id', editingCustomer.id)
           .eq('tenant_id', tenant.id);
         if (updateError) throw updateError;
+        customerId = editingCustomer.id;
       } else {
         // CREATE. Empty strings for optional text -> null; date MUST be null
         // when blank (Postgres rejects '' for a date).
@@ -269,12 +501,48 @@ export function CustomersPage() {
           id_type: formData.id_type || null,
           id_number: formData.id_number.trim() || null,
           id_expiry: formData.id_expiry || null,
+          date_of_birth: formData.date_of_birth || null,
+          nationality: formData.nationality.trim() || null,
           kyc_status: 'pending',
           aml_status: 'pending',
           status: 'active',
+          metadata: { compliance },
         };
-        const { error: insertError } = await supabase.from('customers').insert(insert);
+        const { data: inserted, error: insertError } = await supabase
+          .from('customers')
+          .insert(insert)
+          .select('id')
+          .single();
         if (insertError) throw insertError;
+        customerId = inserted.id;
+      }
+
+      // Upload / remove identification documents now that we have a real id.
+      if (Object.keys(pendingFiles).length > 0 || removedSlots.size > 0) {
+        setDocUploading(true);
+        try {
+          const documents = await uploadDocuments(customerId);
+          const { data: currentRow, error: fetchMetaError } = await supabase
+            .from('customers')
+            .select('metadata')
+            .eq('id', customerId)
+            .single();
+          if (fetchMetaError) throw fetchMetaError;
+          const currentMeta =
+            currentRow?.metadata &&
+            typeof currentRow.metadata === 'object' &&
+            !Array.isArray(currentRow.metadata)
+              ? (currentRow.metadata as Record<string, unknown>)
+              : {};
+          const { error: docUpdateError } = await supabase
+            .from('customers')
+            .update({ metadata: { ...currentMeta, documents } as any })
+            .eq('id', customerId)
+            .eq('tenant_id', tenant.id);
+          if (docUpdateError) throw docUpdateError;
+        } finally {
+          setDocUploading(false);
+        }
       }
 
       await loadCustomers();
@@ -544,7 +812,7 @@ export function CustomersPage() {
         ) : filteredCustomers.length > 0 ? (
           <div className="divide-y divide-slate-100">
             {filteredCustomers.map((customer) => (
-              <div key={customer.id} className="px-6 py-4 hover:bg-slate-50 transition-colors">
+              <div key={customer.id} className="px-4 sm:px-6 py-4 hover:bg-slate-50 transition-colors">
                 <div className="flex items-start gap-4">
                   <div className="w-12 h-12 rounded-full bg-gradient-to-br from-[#641f60] to-[#4a1646] flex items-center justify-center text-white font-medium flex-shrink-0">
                     {customer.customer_type !== 'individual' ? (
@@ -556,19 +824,19 @@ export function CustomersPage() {
                     )}
                   </div>
                   <div className="flex-1 min-w-0">
-                    <div className="flex items-start justify-between gap-4">
+                    <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-2 sm:gap-4">
                       <div className="min-w-0">
                         <h3 className="font-semibold text-slate-900 truncate">
                           {customerDisplayName(customer)}
                         </h3>
                         <p className="text-sm text-slate-500">{customer.customer_number}</p>
                       </div>
-                      <div className="flex items-center gap-3 flex-shrink-0">
+                      <div className="flex items-center gap-2 sm:gap-3 flex-wrap flex-shrink-0">
                         {getKycBadge(customer.kyc_status)}
                         {getStatusBadge(customer.status)}
                       </div>
                     </div>
-                    <div className="flex flex-wrap items-center gap-4 mt-2 text-sm text-slate-600">
+                    <div className="flex flex-wrap items-center gap-3 sm:gap-4 mt-2 text-sm text-slate-600">
                       <span className="flex items-center gap-1.5">
                         <Phone className="w-4 h-4" />
                         {customer.phone}
@@ -588,7 +856,7 @@ export function CustomersPage() {
                       )}
                     </div>
                   </div>
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 flex-shrink-0">
                     <button
                       onClick={() => openDetail(customer)}
                       className="p-2 rounded-lg text-slate-400 hover:text-[#641f60] hover:bg-slate-100 transition-colors"
@@ -632,12 +900,12 @@ export function CustomersPage() {
         )}
       </div>
 
-      {/* Add / Edit Customer Modal */}
+      {/* Add / Edit Customer Modal — bottom sheet on mobile, centered dialog on desktop, always scrollable */}
       {showForm && (
-        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
-            <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between sticky top-0 bg-white z-10">
-              <h2 className="text-xl font-bold text-[#641f60]">
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-end sm:items-center justify-center sm:p-4">
+          <div className="bg-white rounded-t-2xl sm:rounded-2xl shadow-2xl w-full sm:max-w-2xl max-h-[95vh] sm:max-h-[90vh] overflow-y-auto overscroll-contain">
+            <div className="px-4 sm:px-6 py-4 border-b border-slate-200 flex items-center justify-between sticky top-0 bg-white z-10">
+              <h2 className="text-lg sm:text-xl font-bold text-[#641f60]">
                 {editingCustomer ? 'Edit Customer' : 'Add New Customer'}
               </h2>
               <button
@@ -649,30 +917,30 @@ export function CustomersPage() {
               </button>
             </div>
 
-            <form onSubmit={handleSubmit} className="p-6 space-y-6">
+            <form onSubmit={handleSubmit} className="p-4 sm:p-6 space-y-6">
               {/* Customer Type */}
               <div>
                 <label className="block text-sm font-medium text-slate-700 mb-2">Customer Type</label>
-                <div className="grid grid-cols-3 gap-3">
+                <div className="grid grid-cols-3 gap-2 sm:gap-3">
                   {(['individual', 'business', 'organization'] as const).map((type) => (
                     <button
                       key={type}
                       type="button"
                       onClick={() => setFormData((prev) => ({ ...prev, customer_type: type }))}
-                      className={`p-4 rounded-lg border-2 text-center transition-all flex flex-col items-center gap-1.5 ${
+                      className={`p-3 sm:p-4 rounded-lg border-2 text-center transition-all flex flex-col items-center gap-1.5 ${
                         formData.customer_type === type
                           ? 'border-[#641f60] bg-[#641f60]/5 text-[#641f60]'
                           : 'border-slate-200 hover:border-slate-300 text-slate-500'
                       }`}
                     >
                       {type === 'individual' ? (
-                        <User className="w-6 h-6" />
+                        <User className="w-5 h-5 sm:w-6 sm:h-6" />
                       ) : type === 'business' ? (
-                        <Building className="w-6 h-6" />
+                        <Building className="w-5 h-5 sm:w-6 sm:h-6" />
                       ) : (
-                        <Landmark className="w-6 h-6" />
+                        <Landmark className="w-5 h-5 sm:w-6 sm:h-6" />
                       )}
-                      <span className="text-sm font-medium capitalize">{type}</span>
+                      <span className="text-xs sm:text-sm font-medium capitalize">{type}</span>
                     </button>
                   ))}
                 </div>
@@ -778,16 +1046,99 @@ export function CustomersPage() {
                 />
               </div>
 
-              {/* ID */}
+              {/* Identification & Compliance */}
               <div className="border-t border-slate-200 pt-6">
                 <h3 className="text-sm font-semibold text-slate-900 mb-4 flex items-center gap-2">
                   <Shield className="w-5 h-5 text-[#641f60]" />
-                  Identification Documents
+                  Identification &amp; Compliance
                 </h3>
-                <div className="grid md:grid-cols-3 gap-4">
+
+                {/* Core identity details */}
+                <div className="grid sm:grid-cols-2 gap-4 mb-4">
+                  {formData.customer_type === 'individual' && (
+                    <div>
+                      <label className="block text-sm font-medium text-slate-700 mb-1">Date of Birth *</label>
+                      <input
+                        type="date"
+                        required
+                        value={formData.date_of_birth}
+                        onChange={(e) => setFormData((prev) => ({ ...prev, date_of_birth: e.target.value }))}
+                        className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#1ebcb2] focus:border-transparent"
+                      />
+                    </div>
+                  )}
                   <div>
-                    <label className="block text-sm font-medium text-slate-700 mb-1">ID Type</label>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">Nationality</label>
+                    <input
+                      type="text"
+                      value={formData.nationality}
+                      onChange={(e) => setFormData((prev) => ({ ...prev, nationality: e.target.value }))}
+                      className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#1ebcb2] focus:border-transparent"
+                      placeholder="Kenyan"
+                    />
+                  </div>
+                  {formData.customer_type === 'individual' && (
+                    <div>
+                      <label className="block text-sm font-medium text-slate-700 mb-1">Gender</label>
+                      <select
+                        value={formData.gender}
+                        onChange={(e) => setFormData((prev) => ({ ...prev, gender: e.target.value }))}
+                        className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#1ebcb2] focus:border-transparent"
+                      >
+                        <option value="">Select gender</option>
+                        <option value="female">Female</option>
+                        <option value="male">Male</option>
+                        <option value="other">Other</option>
+                        <option value="prefer_not_to_say">Prefer not to say</option>
+                      </select>
+                    </div>
+                  )}
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">Occupation</label>
+                    <input
+                      type="text"
+                      value={formData.occupation}
+                      onChange={(e) => setFormData((prev) => ({ ...prev, occupation: e.target.value }))}
+                      className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#1ebcb2] focus:border-transparent"
+                      placeholder="e.g. Teacher, Shop owner"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">Source of Funds</label>
                     <select
+                      value={formData.source_of_funds}
+                      onChange={(e) => setFormData((prev) => ({ ...prev, source_of_funds: e.target.value }))}
+                      className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#1ebcb2] focus:border-transparent"
+                    >
+                      <option value="">Select source</option>
+                      <option value="salary">Salary/Employment</option>
+                      <option value="business_income">Business Income</option>
+                      <option value="investments">Investments</option>
+                      <option value="inheritance">Inheritance</option>
+                      <option value="remittance">Remittance</option>
+                      <option value="other">Other</option>
+                    </select>
+                  </div>
+                  <div className="flex items-center gap-2 sm:pt-7">
+                    <input
+                      id="is_pep"
+                      type="checkbox"
+                      checked={formData.is_pep}
+                      onChange={(e) => setFormData((prev) => ({ ...prev, is_pep: e.target.checked }))}
+                      className="w-4 h-4 rounded border-slate-300 text-[#641f60] focus:ring-[#1ebcb2]"
+                    />
+                    <label htmlFor="is_pep" className="text-sm text-slate-700">
+                      Politically Exposed Person (PEP)
+                    </label>
+                  </div>
+                </div>
+
+                {/* ID document details */}
+                <div className="grid md:grid-cols-3 gap-4 mb-6">
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">ID Type *</label>
+                    <select
+                      required
                       value={formData.id_type}
                       onChange={(e) => setFormData((prev) => ({ ...prev, id_type: e.target.value }))}
                       className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#1ebcb2] focus:border-transparent"
@@ -799,9 +1150,10 @@ export function CustomersPage() {
                     </select>
                   </div>
                   <div>
-                    <label className="block text-sm font-medium text-slate-700 mb-1">ID Number</label>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">ID Number *</label>
                     <input
                       type="text"
+                      required
                       value={formData.id_number}
                       onChange={(e) => setFormData((prev) => ({ ...prev, id_number: e.target.value }))}
                       className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#1ebcb2] focus:border-transparent"
@@ -815,6 +1167,107 @@ export function CustomersPage() {
                       onChange={(e) => setFormData((prev) => ({ ...prev, id_expiry: e.target.value }))}
                       className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#1ebcb2] focus:border-transparent"
                     />
+                  </div>
+                </div>
+
+                {/* Document uploads */}
+                <div>
+                  <p className="text-sm font-medium text-slate-700 mb-1">Supporting Documents</p>
+                  <p className="text-xs text-slate-500 mb-3">
+                    Upload clear photos or scans (JPG, PNG, or PDF, up to 5MB each).
+                  </p>
+                  <div className="grid sm:grid-cols-2 gap-3">
+                    {DOC_SLOTS.map((slot) => {
+                      const pendingFile = pendingFiles[slot.key];
+                      const preview = previewUrls[slot.key];
+                      const saved = !removedSlots.has(slot.key) ? savedDocuments[slot.key] : undefined;
+                      const docError = docErrors[slot.key];
+                      const hasFile = !!pendingFile || !!saved;
+
+                      return (
+                        <div
+                          key={slot.key}
+                          className={`relative rounded-lg border-2 border-dashed p-3 transition-colors ${
+                            docError
+                              ? 'border-[#c46040] bg-[#c46040]/5'
+                              : hasFile
+                              ? 'border-[#1ebcb2] bg-[#1ebcb2]/5'
+                              : 'border-slate-300 hover:border-slate-400'
+                          }`}
+                        >
+                          <input
+                            ref={(el) => (fileInputRefs.current[slot.key] = el)}
+                            type="file"
+                            accept="image/jpeg,image/png,image/webp,application/pdf"
+                            className="hidden"
+                            onChange={(e) => handleFileSelect(slot.key, e.target.files?.[0])}
+                          />
+
+                          <div className="flex items-start justify-between gap-2 mb-1">
+                            <p className="text-xs font-semibold text-slate-700">{slot.label}</p>
+                            {hasFile && (
+                              <button
+                                type="button"
+                                onClick={() => clearDocumentSlot(slot.key)}
+                                className="text-slate-400 hover:text-[#c46040] transition-colors flex-shrink-0"
+                                aria-label={`Remove ${slot.label}`}
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            )}
+                          </div>
+
+                          {!hasFile ? (
+                            <button
+                              type="button"
+                              onClick={() => fileInputRefs.current[slot.key]?.click()}
+                              className="w-full flex flex-col items-center justify-center gap-1.5 py-4 text-slate-400 hover:text-[#641f60] transition-colors"
+                            >
+                              <Upload className="w-6 h-6" />
+                              <span className="text-xs">{slot.hint}</span>
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => fileInputRefs.current[slot.key]?.click()}
+                              className="w-full flex items-center gap-2.5 text-left"
+                            >
+                              {preview ? (
+                                <img
+                                  src={preview}
+                                  alt={`${slot.label} preview`}
+                                  className="w-12 h-12 rounded-md object-cover border border-slate-200 flex-shrink-0"
+                                />
+                              ) : saved && isImageDoc(saved) ? (
+                                <img
+                                  src={saved.url}
+                                  alt={`${slot.label} preview`}
+                                  className="w-12 h-12 rounded-md object-cover border border-slate-200 flex-shrink-0"
+                                />
+                              ) : (
+                                <div className="w-12 h-12 rounded-md bg-slate-100 flex items-center justify-center flex-shrink-0">
+                                  <FileText className="w-6 h-6 text-slate-400" />
+                                </div>
+                              )}
+                              <div className="min-w-0">
+                                <p className="text-xs font-medium text-slate-700 truncate">
+                                  {pendingFile?.name || saved?.name}
+                                </p>
+                                <p className="text-[11px] text-slate-500">
+                                  {pendingFile
+                                    ? `${formatFileSize(pendingFile.size)} · pending upload`
+                                    : saved
+                                    ? `${formatFileSize(saved.size)} · uploaded`
+                                    : ''}
+                                </p>
+                              </div>
+                            </button>
+                          )}
+
+                          {docError && <p className="text-[11px] text-[#c46040] mt-1">{docError}</p>}
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
               </div>
@@ -842,7 +1295,7 @@ export function CustomersPage() {
                   {submitting ? (
                     <>
                       <Loader2 className="w-5 h-5 animate-spin" />
-                      {editingCustomer ? 'Saving...' : 'Creating...'}
+                      {docUploading ? 'Uploading documents...' : editingCustomer ? 'Saving...' : 'Creating...'}
                     </>
                   ) : editingCustomer ? (
                     <>
@@ -864,10 +1317,10 @@ export function CustomersPage() {
 
       {/* Detail / KYC review Modal */}
       {detailCustomer && (
-        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
-            <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between sticky top-0 bg-white z-10">
-              <h2 className="text-xl font-bold text-[#641f60]">Customer Details</h2>
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-end sm:items-center justify-center sm:p-4">
+          <div className="bg-white rounded-t-2xl sm:rounded-2xl shadow-2xl w-full sm:max-w-2xl max-h-[95vh] sm:max-h-[90vh] overflow-y-auto overscroll-contain">
+            <div className="px-4 sm:px-6 py-4 border-b border-slate-200 flex items-center justify-between sticky top-0 bg-white z-10">
+              <h2 className="text-lg sm:text-xl font-bold text-[#641f60]">Customer Details</h2>
               <button
                 onClick={closeDetail}
                 className="p-2 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition-colors"
@@ -877,7 +1330,7 @@ export function CustomersPage() {
               </button>
             </div>
 
-            <div className="p-6 space-y-6">
+            <div className="p-4 sm:p-6 space-y-6">
               {/* Identity header */}
               <div className="flex items-start gap-4">
                 <div className="w-14 h-14 rounded-full bg-gradient-to-br from-[#641f60] to-[#4a1646] flex items-center justify-center text-white flex-shrink-0">
@@ -943,6 +1396,91 @@ export function CustomersPage() {
                   </p>
                 </div>
               </div>
+
+              {/* Compliance details, if captured */}
+              {(() => {
+                const meta =
+                  detailCustomer.metadata &&
+                  typeof detailCustomer.metadata === 'object' &&
+                  !Array.isArray(detailCustomer.metadata)
+                    ? (detailCustomer.metadata as Record<string, unknown>)
+                    : {};
+                const compliance =
+                  meta.compliance && typeof meta.compliance === 'object' && !Array.isArray(meta.compliance)
+                    ? (meta.compliance as Record<string, unknown>)
+                    : {};
+                // date_of_birth and nationality live on the customer row itself;
+                // show the section whenever any compliance-relevant field exists.
+                const hasAnyData =
+                  !!detailCustomer.date_of_birth ||
+                  !!detailCustomer.nationality ||
+                  !!compliance.gender ||
+                  !!compliance.occupation ||
+                  !!compliance.source_of_funds ||
+                  compliance.is_pep === true;
+                if (!hasAnyData) return null;
+                const rows: [string, string][] = [
+                  ['Date of Birth', fmtDate(detailCustomer.date_of_birth)],
+                  ['Nationality', detailCustomer.nationality || '—'],
+                  ['Gender', typeof compliance.gender === 'string' && compliance.gender ? compliance.gender.replace(/_/g, ' ') : '—'],
+                  ['Occupation', typeof compliance.occupation === 'string' && compliance.occupation ? compliance.occupation : '—'],
+                  ['Source of Funds', typeof compliance.source_of_funds === 'string' && compliance.source_of_funds ? compliance.source_of_funds.replace(/_/g, ' ') : '—'],
+                  ['PEP Status', compliance.is_pep === true ? 'Politically Exposed' : 'Not flagged'],
+                ];
+                return (
+                  <div className="border-t border-slate-200 pt-4">
+                    <p className="text-xs font-semibold text-slate-400 uppercase mb-2">Compliance Profile</p>
+                    <div className="grid sm:grid-cols-2 gap-x-6 gap-y-1.5 text-sm">
+                      {rows.map(([label, value]) => (
+                        <p key={label} className="text-slate-700 capitalize">
+                          <span className="text-slate-400 normal-case">{label}: </span>
+                          {value}
+                        </p>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* Uploaded documents */}
+              {(() => {
+                const docs = getCustomerDocuments(detailCustomer);
+                const entries = DOC_SLOTS.map((slot) => ({ slot, doc: docs[slot.key] })).filter((e) => e.doc);
+                if (entries.length === 0) return null;
+                return (
+                  <div className="border-t border-slate-200 pt-4">
+                    <p className="text-xs font-semibold text-slate-400 uppercase mb-2">Uploaded Documents</p>
+                    <div className="grid sm:grid-cols-2 gap-3">
+                      {entries.map(({ slot, doc }) => (
+                        <a
+                          key={slot.key}
+                          href={doc!.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="flex items-center gap-2.5 p-2.5 rounded-lg border border-slate-200 hover:border-[#1ebcb2] transition-colors"
+                        >
+                          {isImageDoc(doc!) ? (
+                            <img
+                              src={doc!.url}
+                              alt={slot.label}
+                              className="w-10 h-10 rounded-md object-cover border border-slate-200 flex-shrink-0"
+                            />
+                          ) : (
+                            <div className="w-10 h-10 rounded-md bg-slate-100 flex items-center justify-center flex-shrink-0">
+                              <FileText className="w-5 h-5 text-slate-400" />
+                            </div>
+                          )}
+                          <div className="min-w-0 flex-1">
+                            <p className="text-xs font-medium text-slate-700">{slot.label}</p>
+                            <p className="text-[11px] text-slate-500 truncate">{doc!.name}</p>
+                          </div>
+                          <ExternalLink className="w-4 h-4 text-slate-400 flex-shrink-0" />
+                        </a>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })()}
 
               {/* KYC / AML review panel */}
               <div className="border-t border-slate-200 pt-6">

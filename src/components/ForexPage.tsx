@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { supabase } from '../lib/supabase';
 import type { InsertTables } from '../lib/supabase';
@@ -38,9 +38,238 @@ import {
   Power,
   Download,
   Pencil,
+  ChevronDown,
 } from 'lucide-react';
 
+// ============================================================================
+// Currency flags (shared visual language with Transactions / Float / Wallets)
+// ============================================================================
+
 const CURRENCIES = ['KES', 'USD', 'SSP', 'UGX', 'TZS', 'EUR', 'GBP'];
+
+const CURRENCY_NAMES: Record<string, string> = {
+  USD: 'US Dollar',
+  KES: 'Kenyan Shilling',
+  SSP: 'South Sudanese Pound',
+  UGX: 'Ugandan Shilling',
+  TZS: 'Tanzanian Shilling',
+  EUR: 'Euro',
+  GBP: 'British Pound',
+};
+
+function FlagGraphic({ code }: { code: string }) {
+  switch (code) {
+    case 'USD':
+      return (
+        <>
+          <rect width="40" height="40" fill="#b22234" />
+          <rect y="3.08" width="40" height="3.08" fill="#fff" />
+          <rect y="9.23" width="40" height="3.08" fill="#fff" />
+          <rect y="15.38" width="40" height="3.08" fill="#fff" />
+          <rect y="21.54" width="40" height="3.08" fill="#fff" />
+          <rect y="27.69" width="40" height="3.08" fill="#fff" />
+          <rect y="33.85" width="40" height="3.08" fill="#fff" />
+          <rect width="18" height="21.54" fill="#3c3b6e" />
+          <g fill="#fff">
+            {[4, 10, 16].map((y) =>
+              [3, 7, 11, 15].map((x) => <circle key={`${x}-${y}`} cx={x} cy={y} r="1" />)
+            )}
+          </g>
+        </>
+      );
+    case 'KES':
+      return (
+        <>
+          <rect width="40" height="10" fill="#000" />
+          <rect y="10" width="40" height="4" fill="#fff" />
+          <rect y="14" width="40" height="12" fill="#bb0000" />
+          <rect y="26" width="40" height="4" fill="#fff" />
+          <rect y="30" width="40" height="10" fill="#006600" />
+          <ellipse cx="20" cy="20" rx="4.5" ry="8" fill="#fff" />
+          <ellipse cx="20" cy="20" rx="3" ry="6.5" fill="#bb0000" />
+          <path d="M20 11 L21.5 20 L20 29 L18.5 20 Z" fill="#000" />
+        </>
+      );
+    case 'SSP':
+      return (
+        <>
+          <rect width="40" height="12" fill="#000" />
+          <rect y="12" width="40" height="2" fill="#fff" />
+          <rect y="14" width="40" height="12" fill="#bb0000" />
+          <rect y="26" width="40" height="2" fill="#fff" />
+          <rect y="28" width="40" height="12" fill="#009543" />
+          <path d="M0 0 L20 20 L0 40 Z" fill="#0f47af" />
+          <path d="M4 20 l5.5 -1.8 -3.4 4.7 0 -5.8 3.4 4.7 z" fill="#fcdd09" />
+        </>
+      );
+    case 'UGX':
+      return (
+        <>
+          <rect width="40" height="6.67" fill="#000" />
+          <rect y="6.67" width="40" height="6.67" fill="#fcdc04" />
+          <rect y="13.33" width="40" height="6.67" fill="#d90000" />
+          <rect y="20" width="40" height="6.67" fill="#000" />
+          <rect y="26.67" width="40" height="6.67" fill="#fcdc04" />
+          <rect y="33.33" width="40" height="6.67" fill="#d90000" />
+          <circle cx="20" cy="20" r="6" fill="#fff" />
+          <circle cx="20" cy="20" r="5.4" fill="none" stroke="#000" strokeWidth="0.4" />
+        </>
+      );
+    case 'TZS':
+      return (
+        <>
+          <path d="M0 0 H40 V40 H0 Z" fill="#1eb53a" />
+          <path d="M40 0 V40 H0 Z" fill="#00a3dd" />
+          <path d="M0 40 L40 0 v6 L6 40 Z" fill="#fcd116" />
+          <path d="M0 40 L40 0 h-6 L0 34 Z" fill="#fcd116" />
+          <path d="M0 34 L34 0 h-34 Z M40 6 L6 40 h34 Z" fill="#000" />
+        </>
+      );
+    case 'EUR':
+      return (
+        <>
+          <rect width="40" height="40" fill="#003399" />
+          <g fill="#ffcc00">
+            {Array.from({ length: 12 }).map((_, i) => {
+              const angle = (i * 30 * Math.PI) / 180;
+              const cx = 20 + 11 * Math.sin(angle);
+              const cy = 20 - 11 * Math.cos(angle);
+              return <circle key={i} cx={cx} cy={cy} r="1.6" />;
+            })}
+          </g>
+        </>
+      );
+    case 'GBP':
+      return (
+        <>
+          <rect width="40" height="40" fill="#012169" />
+          <path d="M0 0 L40 40 M40 0 L0 40" stroke="#fff" strokeWidth="6" />
+          <path d="M0 0 L40 40 M40 0 L0 40" stroke="#c8102e" strokeWidth="3" />
+          <path d="M20 0 V40 M0 20 H40" stroke="#fff" strokeWidth="10" />
+          <path d="M20 0 V40 M0 20 H40" stroke="#c8102e" strokeWidth="6" />
+        </>
+      );
+    default:
+      return (
+        <>
+          <rect width="40" height="40" fill="#64748b" />
+          <text
+            x="20"
+            y="21"
+            textAnchor="middle"
+            dominantBaseline="central"
+            fontSize="14"
+            fontWeight="700"
+            fill="#fff"
+            fontFamily="system-ui, sans-serif"
+          >
+            {code.slice(0, 2)}
+          </text>
+        </>
+      );
+  }
+}
+
+function CurrencyBadge({ code, size = 22 }: { code: string; size?: number }) {
+  const clipId = `forex-flag-clip-${code}`;
+  return (
+    <svg width={size} height={size} viewBox="0 0 40 40" role="img" aria-label={`${code} flag`} className="flex-shrink-0">
+      <defs>
+        <clipPath id={clipId}>
+          <circle cx="20" cy="20" r="20" />
+        </clipPath>
+      </defs>
+      <g clipPath={`url(#${clipId})`}>
+        <FlagGraphic code={code} />
+      </g>
+      <circle cx="20" cy="20" r="19" fill="none" stroke="#00000022" strokeWidth="2" />
+    </svg>
+  );
+}
+
+function CurrencySelect({
+  value,
+  onChange,
+  options = CURRENCIES,
+  disabled,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  options?: string[];
+  disabled?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        type="button"
+        disabled={disabled}
+        onClick={() => setOpen((p) => !p)}
+        className={`w-full flex items-center gap-2 pl-3 pr-3 py-2.5 border rounded-lg text-left transition-colors ${
+          disabled
+            ? 'bg-slate-50 text-slate-400 border-slate-200 cursor-not-allowed'
+            : 'border-slate-300 bg-white hover:border-slate-400 focus:outline-none focus:ring-2 focus:ring-[#1ebcb2]'
+        }`}
+      >
+        <CurrencyBadge code={value} />
+        <span className="flex-1 min-w-0 truncate text-slate-900">
+          <span className="font-medium">{value}</span>
+          <span className="hidden sm:inline text-slate-400"> · {CURRENCY_NAMES[value] || value}</span>
+        </span>
+        <ChevronDown className="w-4 h-4 text-slate-400 flex-shrink-0" />
+      </button>
+
+      {open && !disabled && (
+        <div className="absolute z-30 mt-1 w-full bg-white border border-slate-200 rounded-lg shadow-lg max-h-60 overflow-y-auto">
+          {options.map((c) => (
+            <button
+              key={c}
+              type="button"
+              onClick={() => {
+                onChange(c);
+                setOpen(false);
+              }}
+              className={`w-full flex items-center gap-2 px-3 py-2 text-left text-sm hover:bg-slate-50 ${
+                c === value ? 'bg-[#1ebcb2]/10' : ''
+              }`}
+            >
+              <CurrencyBadge code={c} size={20} />
+              <span className={c === value ? 'text-[#641f60] font-medium' : 'text-slate-700'}>{c}</span>
+              <span className="text-slate-400 truncate">{CURRENCY_NAMES[c] || ''}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// A compact inline pair label with two flags, e.g. 🇺🇸 USD → 🇰🇪 KES
+function PairLabel({ from, to, size = 20 }: { from: string; to: string; size?: number }) {
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      <CurrencyBadge code={from} size={size} />
+      <span className="font-semibold text-slate-900">{from}</span>
+      <ArrowRight className="w-3.5 h-3.5 text-slate-300" />
+      <CurrencyBadge code={to} size={size} />
+      <span className="font-semibold text-slate-900">{to}</span>
+    </span>
+  );
+}
+
+// ============================================================================
+// Form data
+// ============================================================================
 
 interface RateForm {
   from_currency: string;
@@ -393,7 +622,7 @@ export function ForexPage() {
       </div>
 
       {loadError && (
-        <div className="bg-[#c46040]/10 border border-[#c46040]/30 rounded-xl p-4 flex items-center gap-4">
+        <div className="bg-[#c46040]/10 border border-[#c46040]/30 rounded-xl p-4 flex flex-col sm:flex-row sm:items-center gap-4">
           <div className="w-11 h-11 rounded-full bg-[#c46040]/15 flex items-center justify-center flex-shrink-0">
             <AlertCircle className="w-6 h-6 text-[#c46040]" />
           </div>
@@ -403,7 +632,7 @@ export function ForexPage() {
           </div>
           <button
             onClick={loadRates}
-            className="px-4 py-2 bg-[#ee7b22] hover:bg-[#c46040] text-white text-sm font-medium rounded-lg transition-colors flex items-center gap-2"
+            className="px-4 py-2 bg-[#ee7b22] hover:bg-[#c46040] text-white text-sm font-medium rounded-lg transition-colors flex items-center justify-center gap-2"
           >
             <RefreshCw className="w-4 h-4" />
             Retry
@@ -412,7 +641,7 @@ export function ForexPage() {
       )}
 
       {/* Converter */}
-      <div className="bg-white rounded-xl border border-[#dae1e1] p-6">
+      <div className="bg-white rounded-xl border border-[#dae1e1] p-4 sm:p-6">
         <div className="flex items-center justify-between mb-4">
           <h2 className="font-semibold text-slate-900 flex items-center gap-2">
             <Calculator className="w-5 h-5 text-[#1ebcb2]" />
@@ -437,7 +666,7 @@ export function ForexPage() {
             </button>
           </div>
         </div>
-        <div className="grid md:grid-cols-4 gap-4 items-end">
+        <div className="grid sm:grid-cols-2 md:grid-cols-4 gap-4 items-end">
           <div>
             <label className="block text-sm font-medium text-slate-700 mb-1">Amount</label>
             <input
@@ -451,38 +680,25 @@ export function ForexPage() {
           </div>
           <div>
             <label className="block text-sm font-medium text-slate-700 mb-1">From</label>
-            <select
-              value={convertFrom}
-              onChange={(e) => setConvertFrom(e.target.value)}
-              className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#1ebcb2] focus:border-transparent"
-            >
-              {CURRENCIES.map((c) => (
-                <option key={c} value={c}>{c}</option>
-              ))}
-            </select>
+            <CurrencySelect value={convertFrom} onChange={setConvertFrom} />
           </div>
-          <div className="flex items-center justify-center pb-2">
+          <div className="hidden md:flex items-center justify-center pb-2">
             <ArrowRight className="w-6 h-6 text-slate-400" />
           </div>
           <div>
             <label className="block text-sm font-medium text-slate-700 mb-1">To</label>
-            <select
-              value={convertTo}
-              onChange={(e) => setConvertTo(e.target.value)}
-              className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#1ebcb2] focus:border-transparent"
-            >
-              {CURRENCIES.map((c) => (
-                <option key={c} value={c}>{c}</option>
-              ))}
-            </select>
+            <CurrencySelect value={convertTo} onChange={setConvertTo} />
           </div>
         </div>
         <div className="mt-4 p-4 bg-[#1ebcb2]/10 rounded-lg">
           {conversion.found ? (
             <>
-              <p className="text-sm text-slate-600">
-                {(parseFloat(convertAmount) || 0).toLocaleString()} {convertFrom} =
-                <span className="text-xl font-bold text-[#641f60] ml-2">
+              <p className="text-sm text-slate-600 flex flex-wrap items-center gap-2">
+                <span>
+                  {(parseFloat(convertAmount) || 0).toLocaleString()} {convertFrom} =
+                </span>
+                <span className="text-xl font-bold text-[#641f60] flex items-center gap-1.5">
+                  <CurrencyBadge code={convertTo} size={20} />
                   {conversion.result.toLocaleString(undefined, { maximumFractionDigits: 2 })} {convertTo}
                 </span>
               </p>
@@ -501,8 +717,8 @@ export function ForexPage() {
       </div>
 
       {/* Rate history chart */}
-      <div className="bg-white rounded-xl border border-[#dae1e1] p-6">
-        <div className="flex items-center justify-between mb-4">
+      <div className="bg-white rounded-xl border border-[#dae1e1] p-4 sm:p-6">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
           <h2 className="font-semibold text-slate-900 flex items-center gap-2">
             <TrendingUp className="w-5 h-5 text-[#ee7b22]" />
             Rate History
@@ -520,17 +736,19 @@ export function ForexPage() {
           )}
         </div>
         {chartData.length > 1 ? (
-          <div style={{ width: '100%', height: 280 }}>
-            <ResponsiveContainer>
-              <LineChart data={chartData} margin={{ top: 5, right: 20, bottom: 5, left: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                <XAxis dataKey="date" tick={{ fontSize: 12, fill: '#64748b' }} />
-                <YAxis tick={{ fontSize: 12, fill: '#64748b' }} domain={['auto', 'auto']} />
-                <Tooltip />
-                <Line type="monotone" dataKey="buy" stroke="#1ebcb2" strokeWidth={2} dot={false} name="Buy" />
-                <Line type="monotone" dataKey="sell" stroke="#ee7b22" strokeWidth={2} dot={false} name="Sell" />
-              </LineChart>
-            </ResponsiveContainer>
+          <div className="w-full overflow-x-auto">
+            <div style={{ width: '100%', minWidth: 320, height: 280 }}>
+              <ResponsiveContainer>
+                <LineChart data={chartData} margin={{ top: 5, right: 20, bottom: 5, left: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                  <XAxis dataKey="date" tick={{ fontSize: 12, fill: '#64748b' }} />
+                  <YAxis tick={{ fontSize: 12, fill: '#64748b' }} domain={['auto', 'auto']} />
+                  <Tooltip />
+                  <Line type="monotone" dataKey="buy" stroke="#1ebcb2" strokeWidth={2} dot={false} name="Buy" />
+                  <Line type="monotone" dataKey="sell" stroke="#ee7b22" strokeWidth={2} dot={false} name="Sell" />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
           </div>
         ) : (
           <div className="py-12 text-center text-slate-400 text-sm">
@@ -543,7 +761,7 @@ export function ForexPage() {
 
       {/* Active rates */}
       <div className="bg-white rounded-xl border border-[#dae1e1] overflow-hidden">
-        <div className="px-6 py-4 border-b border-[#dae1e1]">
+        <div className="px-4 sm:px-6 py-4 border-b border-[#dae1e1]">
           <h2 className="font-semibold text-slate-900">Active Exchange Rates</h2>
         </div>
         {loading ? (
@@ -553,38 +771,38 @@ export function ForexPage() {
         ) : rates.length > 0 ? (
           <div className="divide-y divide-[#dae1e1]">
             {rates.map((rate) => (
-              <div key={rate.id} className="p-6 hover:bg-slate-50 transition-colors">
+              <div key={rate.id} className="p-4 sm:p-6 hover:bg-slate-50 transition-colors">
                 <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-                  <div className="flex items-center gap-4">
-                    <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-[#641f60] to-[#ee7b22] flex items-center justify-center text-white flex-shrink-0">
-                      <Globe className="w-6 h-6" />
+                  <div className="flex items-center gap-3 sm:gap-4">
+                    <div className="w-11 h-11 sm:w-12 sm:h-12 rounded-xl bg-gradient-to-br from-[#641f60] to-[#ee7b22] flex items-center justify-center text-white flex-shrink-0">
+                      <Globe className="w-5 h-5 sm:w-6 sm:h-6" />
                     </div>
-                    <div>
+                    <div className="min-w-0">
                       <h3 className="font-semibold text-slate-900">
-                        {rate.from_currency} / {rate.to_currency}
+                        <PairLabel from={rate.from_currency} to={rate.to_currency} />
                       </h3>
                       <p className="text-sm text-slate-500">
                         Updated {new Date(rate.updated_at).toLocaleString()}
                       </p>
                     </div>
                   </div>
-                  <div className="flex items-center gap-6">
-                    <div className="grid grid-cols-3 gap-6 text-center">
+                  <div className="flex items-center justify-between sm:justify-start gap-4 sm:gap-6">
+                    <div className="grid grid-cols-3 gap-3 sm:gap-6 text-center flex-1 sm:flex-initial">
                       <div>
                         <p className="text-xs text-slate-500">Buy</p>
-                        <p className="text-lg font-bold text-[#1ebcb2]">{fmtRate(rate.buy_rate)}</p>
+                        <p className="text-base sm:text-lg font-bold text-[#1ebcb2]">{fmtRate(rate.buy_rate)}</p>
                       </div>
                       <div>
                         <p className="text-xs text-slate-500">Sell</p>
-                        <p className="text-lg font-bold text-[#ee7b22]">{fmtRate(rate.sell_rate)}</p>
+                        <p className="text-base sm:text-lg font-bold text-[#ee7b22]">{fmtRate(rate.sell_rate)}</p>
                       </div>
                       <div>
                         <p className="text-xs text-slate-500">Spread</p>
-                        <p className="text-lg font-medium text-slate-900">{spread(rate)}%</p>
+                        <p className="text-base sm:text-lg font-medium text-slate-900">{spread(rate)}%</p>
                       </div>
                     </div>
                     {canManage && (
-                      <div className="flex items-center gap-1">
+                      <div className="flex items-center gap-1 flex-shrink-0">
                         <button
                           onClick={() => openEdit(rate)}
                           className="p-2 rounded-lg text-slate-400 hover:text-[#641f60] hover:bg-slate-100 transition-colors"
@@ -618,7 +836,7 @@ export function ForexPage() {
             ))}
           </div>
         ) : (
-          <div className="py-12 text-center">
+          <div className="py-12 text-center px-4">
             <Globe className="w-12 h-12 text-slate-300 mx-auto mb-3" />
             <p className="text-slate-500">No exchange rates configured</p>
             {canManage && (
@@ -635,10 +853,11 @@ export function ForexPage() {
 
       {/* Add / Edit rate modal */}
       {showForm && (
-        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl shadow-2xl max-w-lg w-full max-h-[90vh] overflow-y-auto">
-            <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between sticky top-0 bg-white z-10">
-              <h2 className="text-xl font-bold text-[#641f60]">
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-stretch sm:items-center justify-center p-0 sm:p-4">
+          <div className="bg-white w-full sm:max-w-lg sm:rounded-2xl shadow-2xl flex flex-col h-full sm:h-auto sm:max-h-[90vh] overflow-hidden">
+            {/* Fixed header */}
+            <div className="px-4 sm:px-6 py-4 border-b border-slate-200 flex items-center justify-between flex-shrink-0">
+              <h2 className="text-lg sm:text-xl font-bold text-[#641f60]">
                 {editingRate ? 'Edit Exchange Rate' : 'Add Exchange Rate'}
               </h2>
               <button
@@ -650,33 +869,28 @@ export function ForexPage() {
               </button>
             </div>
 
-            <form onSubmit={handleSubmit} className="p-6 space-y-4">
+            {/* Scrollable body */}
+            <form
+              id="exchange-rate-form"
+              onSubmit={handleSubmit}
+              className="flex-1 overflow-y-auto overscroll-contain px-4 sm:px-6 py-5 space-y-4"
+            >
               <div className="grid grid-cols-2 gap-4">
                 <div>
                   <label className="block text-sm font-medium text-slate-700 mb-1">From Currency</label>
-                  <select
+                  <CurrencySelect
                     value={formData.from_currency}
                     disabled={!!editingRate}
-                    onChange={(e) => setFormData((prev) => ({ ...prev, from_currency: e.target.value }))}
-                    className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#1ebcb2] focus:border-transparent disabled:bg-slate-50 disabled:text-slate-500"
-                  >
-                    {CURRENCIES.map((c) => (
-                      <option key={c} value={c}>{c}</option>
-                    ))}
-                  </select>
+                    onChange={(v) => setFormData((prev) => ({ ...prev, from_currency: v }))}
+                  />
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-slate-700 mb-1">To Currency</label>
-                  <select
+                  <CurrencySelect
                     value={formData.to_currency}
                     disabled={!!editingRate}
-                    onChange={(e) => setFormData((prev) => ({ ...prev, to_currency: e.target.value }))}
-                    className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#1ebcb2] focus:border-transparent disabled:bg-slate-50 disabled:text-slate-500"
-                  >
-                    {CURRENCIES.map((c) => (
-                      <option key={c} value={c}>{c}</option>
-                    ))}
-                  </select>
+                    onChange={(v) => setFormData((prev) => ({ ...prev, to_currency: v }))}
+                  />
                 </div>
               </div>
 
@@ -735,39 +949,48 @@ export function ForexPage() {
                 />
               </div>
 
-              {formError && (
-                <div className="p-3 bg-[#c46040]/10 border border-[#c46040]/30 rounded-lg text-[#c46040] text-sm">
-                  {formError}
+              {formData.from_currency && formData.to_currency && formData.from_currency !== formData.to_currency && (
+                <div className="p-3 bg-slate-50 rounded-lg">
+                  <PairLabel from={formData.from_currency} to={formData.to_currency} />
                 </div>
               )}
 
-              <div className="flex items-center justify-end gap-3 pt-2">
-                <button
-                  type="button"
-                  onClick={closeForm}
-                  className="px-4 py-2.5 border border-slate-300 text-slate-700 font-medium rounded-lg hover:bg-slate-50 transition-colors"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={submitting}
-                  className="px-6 py-2.5 bg-[#ee7b22] hover:bg-[#c46040] text-white font-medium rounded-lg shadow-lg disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 transition-all"
-                >
-                  {submitting ? (
-                    <>
-                      <Loader2 className="w-5 h-5 animate-spin" />
-                      Saving...
-                    </>
-                  ) : (
-                    <>
-                      <Plus className="w-5 h-5" />
-                      {editingRate ? 'Save Changes' : 'Add Rate'}
-                    </>
-                  )}
-                </button>
-              </div>
+              {formError && (
+                <div className="p-3 bg-[#c46040]/10 border border-[#c46040]/30 rounded-lg text-[#c46040] text-sm flex items-center gap-2">
+                  <AlertCircle className="w-5 h-5 flex-shrink-0" />
+                  {formError}
+                </div>
+              )}
             </form>
+
+            {/* Fixed footer */}
+            <div className="flex flex-col-reverse sm:flex-row items-stretch sm:items-center sm:justify-end gap-3 px-4 sm:px-6 py-4 border-t border-slate-200 flex-shrink-0 bg-white">
+              <button
+                type="button"
+                onClick={closeForm}
+                className="px-4 py-2.5 border border-slate-300 text-slate-700 font-medium rounded-lg hover:bg-slate-50 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                form="exchange-rate-form"
+                disabled={submitting}
+                className="px-6 py-2.5 bg-[#ee7b22] hover:bg-[#c46040] text-white font-medium rounded-lg shadow-lg disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 transition-all"
+              >
+                {submitting ? (
+                  <>
+                    <Loader2 className="w-5 h-5 animate-spin" />
+                    Saving...
+                  </>
+                ) : (
+                  <>
+                    <Plus className="w-5 h-5" />
+                    {editingRate ? 'Save Changes' : 'Add Rate'}
+                  </>
+                )}
+              </button>
+            </div>
           </div>
         </div>
       )}

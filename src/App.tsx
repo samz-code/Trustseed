@@ -40,11 +40,24 @@ import { ForexPage } from './components/ForexPage';
 import { ApprovalsPage } from './components/ApprovalsPage';
 import { UsersRolesPage } from './components/UsersRolesPage';
 import LoadingScreen from './components/LoadingScreen';
-import { AlertTriangle, RefreshCw } from 'lucide-react';
+import { AlertTriangle, RefreshCw, Home } from 'lucide-react';
+
+// ==========================================
+// SUPER ADMINISTRATIVE SECTION IMPORTS
+// ==========================================
+import {
+  AdminOverview,
+  AdminInstitutions,
+  AdminBilling,
+  AdminTeamManagement,
+  AdminBroadcasts,
+  AdminAuditLogs
+} from './components/AdminPanelSections';
 
 function AppContent() {
-  const { user, tenant, loading, error, needsPayment } = useAuth();
+  const { user, tenant, loading, error, needsPayment, signOut } = useAuth();
   const [currentPage, setCurrentPage] = React.useState('dashboard');
+  const [signingOut, setSigningOut] = React.useState(false);
 
   React.useEffect(() => {
     const handleNavigation = (e: CustomEvent) => {
@@ -53,6 +66,29 @@ function AppContent() {
     window.addEventListener('navigate', handleNavigation as EventListener);
     return () => window.removeEventListener('navigate', handleNavigation as EventListener);
   }, []);
+
+  // Inspect context attributes to evaluate whether user belongs to core operation tier
+  const isPlatformSuperAdmin = React.useMemo(() => {
+    if (!user || !user.email) return false;
+    
+    // Evaluate via identity token metadata flags or designated administrative routing domains
+    return (
+      user.user_metadata?.is_platform_admin === true ||
+      user.email.endsWith('@trustseed.net') || 
+      user.email.endsWith('@trustseed.network')
+    );
+  }, [user]);
+
+  const handleBackToHome = async () => {
+    setSigningOut(true);
+    try {
+      await signOut();
+    } catch (err) {
+      console.error('Error signing out from error screen:', err);
+    } finally {
+      window.location.href = '/';
+    }
+  };
 
   if (loading) {
     return <LoadingScreen message="Loading Trust Seed Platform…" />;
@@ -82,19 +118,39 @@ function AppContent() {
               <p className="text-slate-600 mb-6 leading-relaxed">{description}</p>
               <button
                 onClick={() => window.location.reload()}
-                className="w-full px-6 py-3 bg-[#ee7b22] text-white font-medium rounded-lg shadow-lg transition-all hover:bg-[#c46040] flex items-center justify-center gap-2"
+                disabled={signingOut}
+                className="w-full px-6 py-3 bg-[#ee7b22] text-white font-medium rounded-lg shadow-lg transition-all hover:bg-[#c46040] disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
               >
                 <RefreshCw className="w-4 h-4" />
                 Retry
               </button>
-              {isUnconfirmedEmail && (
+              {isUnconfirmedEmail ? (
                 <button
                   onClick={() => {
                     window.location.href = '/auth';
                   }}
-                  className="w-full mt-3 px-6 py-3 border-2 border-[#641f60] text-[#641f60] font-medium rounded-lg transition-all hover:bg-[#641f60]/5"
+                  disabled={signingOut}
+                  className="w-full mt-3 px-6 py-3 border-2 border-[#641f60] text-[#641f60] font-medium rounded-lg transition-all hover:bg-[#641f60]/5 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   Back to Sign In
+                </button>
+              ) : (
+                <button
+                  onClick={handleBackToHome}
+                  disabled={signingOut}
+                  className="w-full mt-3 px-6 py-3 border-2 border-[#641f60] text-[#641f60] font-medium rounded-lg transition-all hover:bg-[#641f60]/5 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                >
+                  {signingOut ? (
+                    <>
+                      <RefreshCw className="w-4 h-4 animate-spin" />
+                      Signing out...
+                    </>
+                  ) : (
+                    <>
+                      <Home className="w-4 h-4" />
+                      Back to Home
+                    </>
+                  )}
                 </button>
               )}
             </div>
@@ -122,19 +178,51 @@ function AppContent() {
     );
   }
 
-  // Signed up but hasn't completed payment yet - no tenant exists for them
-  // until provisioning runs, so this must come before any tenant-dependent
-  // rendering (including DashboardLayout) or they'd hit the stuck-skeleton
-  // dashboard with nothing to load.
-  if (needsPayment) {
-    return <CheckoutPage />;
+  // Skip tenant subscription checkpoints if the user has platform super-admin privileges
+  if (!isPlatformSuperAdmin) {
+    if (needsPayment) {
+      return <CheckoutPage />;
+    }
+
+    if (tenant && !tenant.onboarding_completed) {
+      return <OnboardingPage />;
+    }
   }
 
-  if (tenant && !tenant.onboarding_completed) {
-    return <OnboardingPage />;
+  // ==========================================
+  // VIEW ROUTER: PLATFORM SUPER ADMINISTRATIVE VIEW
+  // ==========================================
+  if (isPlatformSuperAdmin) {
+    const renderAdminPage = () => {
+      switch (currentPage) {
+        case 'dashboard':
+          return <AdminOverview />;
+        case 'institutions':
+          return <AdminInstitutions />;
+        case 'billing':
+          return <AdminBilling />;
+        case 'team':
+          return <AdminTeamManagement />;
+        case 'notifications':
+          return <AdminBroadcasts />;
+        case 'audit':
+          return <AdminAuditLogs />;
+        default:
+          return <AdminOverview />;
+      }
+    };
+
+    return (
+      <DashboardLayout>
+        {renderAdminPage()}
+      </DashboardLayout>
+    );
   }
 
-  const renderPage = () => {
+  // ==========================================
+  // VIEW ROUTER: TENANT SUBSCRIBER OPERATIONS
+  // ==========================================
+  const renderTenantPage = () => {
     switch (currentPage) {
       case 'dashboard':
         return <DashboardPage />;
@@ -193,7 +281,7 @@ function AppContent() {
 
   return (
     <DashboardLayout>
-      {renderPage()}
+      {renderTenantPage()}
     </DashboardLayout>
   );
 }
