@@ -18,13 +18,23 @@ import {
   ChevronRight,
   ArrowRightLeft,
   Building,
+  KeyRound,
 } from 'lucide-react';
 
 type Approval = Tables<'transaction_approvals'>;
 type Transaction = Tables<'transactions'>;
 
+// Local extension for the two PIN-confirmation columns — see the matching
+// note in TransactionsPage.tsx. These must exist on `transactions`:
+//   ALTER TABLE transactions ADD COLUMN requires_pin_confirmation boolean NOT NULL DEFAULT false;
+//   ALTER TABLE transactions ADD COLUMN pin_confirmed_at timestamptz;
+type PinGatedTransaction = Transaction & {
+  requires_pin_confirmation: boolean;
+  pin_confirmed_at: string | null;
+};
+
 interface ApprovalGroup {
-  transaction: Transaction;
+  transaction: PinGatedTransaction;
   approvals: Approval[]; // sorted ascending by approval_level
   currentLevel: Approval | null; // lowest pending level (the only actionable one)
   isRejected: boolean;
@@ -93,8 +103,8 @@ export function ApprovalsPage() {
         .in('id', txIds);
       if (txError) throw txError;
 
-      const txMap = new Map<string, Transaction>();
-      (txRows ?? []).forEach((t) => txMap.set(t.id, t));
+      const txMap = new Map<string, PinGatedTransaction>();
+      (txRows ?? []).forEach((t) => txMap.set(t.id, t as PinGatedTransaction));
 
       // Build one group per transaction.
       const byTx = new Map<string, Approval[]>();
@@ -159,24 +169,45 @@ export function ApprovalsPage() {
   }, [showHistory, resolvedGroups, pendingGroups, searchQuery]);
 
   // After a level is approved, advance the transaction if it was the last level.
+  // Transfers that require PIN confirmation are NOT marked completed here —
+  // manager approval only clears the way; the transaction only executes once
+  // the originating cashier confirms with their PIN (TransactionsPage), which
+  // is itself verified server-side, never by this page or the client.
   const advanceTransactionIfComplete = async (group: ApprovalGroup, justApprovedLevel: number) => {
     if (!tenant) return;
     const remaining = group.approvals.filter(
       (a) => a.approval_level !== justApprovedLevel && a.status === 'pending'
     );
     if (remaining.length === 0) {
-      // All levels approved -> mark the transaction approved + completed.
-      await supabase
-        .from('transactions')
-        .update({
-          status: 'completed',
-          current_approval_level: justApprovedLevel,
-          approved_by: admin?.id ?? null,
-          approved_at: new Date().toISOString(),
-          completed_at: new Date().toISOString(),
-        })
-        .eq('id', group.transaction.id)
-        .eq('tenant_id', tenant.id);
+      const needsPin = group.transaction.requires_pin_confirmation && !group.transaction.pin_confirmed_at;
+      if (needsPin) {
+        // All approval levels cleared, but execution is still gated on the
+        // cashier's PIN. Mark it 'approved' (not 'completed') so it shows up
+        // as "ready to send" rather than done.
+        await supabase
+          .from('transactions')
+          .update({
+            status: 'approved',
+            current_approval_level: justApprovedLevel,
+            approved_by: admin?.id ?? null,
+            approved_at: new Date().toISOString(),
+          })
+          .eq('id', group.transaction.id)
+          .eq('tenant_id', tenant.id);
+      } else {
+        // No PIN gate on this transaction type — approval fully completes it.
+        await supabase
+          .from('transactions')
+          .update({
+            status: 'completed',
+            current_approval_level: justApprovedLevel,
+            approved_by: admin?.id ?? null,
+            approved_at: new Date().toISOString(),
+            completed_at: new Date().toISOString(),
+          })
+          .eq('id', group.transaction.id)
+          .eq('tenant_id', tenant.id);
+      }
     } else {
       // Advance the level counter so downstream UI reflects progress.
       await supabase
@@ -375,6 +406,8 @@ export function ApprovalsPage() {
               const isExpanded = expandedId === tx.id;
               const actionable =
                 currentLevel !== null && canActOnRole(admin?.role, currentLevel.required_role);
+              const awaitingPin =
+                group.isFullyApproved && tx.requires_pin_confirmation && !tx.pin_confirmed_at;
               return (
                 <div key={tx.id}>
                   <div className="px-5 py-4 hover:bg-slate-50 transition-colors">
@@ -401,10 +434,16 @@ export function ApprovalsPage() {
                               Rejected
                             </span>
                           )}
-                          {group.isFullyApproved && (
+                          {group.isFullyApproved && !awaitingPin && (
                             <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-[#1ebcb2]/10 text-[#1ebcb2] text-xs font-medium rounded-full">
                               <CheckCircle className="w-3 h-3" />
                               Fully Approved
+                            </span>
+                          )}
+                          {awaitingPin && (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-[#ee7b22]/10 text-[#ee7b22] text-xs font-medium rounded-full">
+                              <KeyRound className="w-3 h-3" />
+                              Awaiting Cashier PIN
                             </span>
                           )}
                         </div>
@@ -418,6 +457,12 @@ export function ApprovalsPage() {
                           <p className="text-xs text-slate-500 mt-1">
                             Awaiting level {currentLevel.approval_level}:{' '}
                             <span className="font-medium">{formatRole(currentLevel.required_role)}</span>
+                          </p>
+                        )}
+                        {awaitingPin && (
+                          <p className="text-xs text-slate-500 mt-1">
+                            Approved &mdash; the transaction executes once the originating cashier confirms with
+                            their PIN.
                           </p>
                         )}
                       </div>
@@ -492,6 +537,20 @@ export function ApprovalsPage() {
                               </div>
                             );
                           })}
+                          {awaitingPin && (
+                            <div className="px-4 py-3 flex items-center justify-between bg-[#ee7b22]/5">
+                              <div className="flex items-center gap-3">
+                                <span className="w-7 h-7 rounded-full bg-[#ee7b22]/10 flex items-center justify-center text-[#ee7b22]">
+                                  <KeyRound className="w-3.5 h-3.5" />
+                                </span>
+                                <p className="text-sm font-medium text-slate-800">Cashier PIN Confirmation</p>
+                              </div>
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium capitalize bg-[#ee7b22]/10 text-[#ee7b22]">
+                                <Clock className="w-3.5 h-3.5" />
+                                pending
+                              </span>
+                            </div>
+                          )}
                         </div>
                       </div>
                     </div>

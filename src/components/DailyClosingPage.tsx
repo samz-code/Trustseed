@@ -26,6 +26,7 @@ import {
   TrendingDown,
   Activity,
   Coins,
+  Globe,
 } from 'lucide-react';
 
 // ============================================================================
@@ -322,6 +323,12 @@ export function DailyClosingPage() {
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [manualRates, setManualRates] = useState<Record<string, string>>({});
+  // Live-API fallback: when a pair isn't configured in Forex Trading, we
+  // auto-fetch a mid-market rate from the same free API the Forex page uses
+  // (open.er-api.com) instead of immediately asking for manual entry.
+  const [liveRates, setLiveRates] = useState<Record<string, number>>({});
+  const [liveRateLoading, setLiveRateLoading] = useState<Record<string, boolean>>({});
+  const [liveRateError, setLiveRateError] = useState<Record<string, string>>({});
 
   const { rates: fxRates, loading: fxLoading, error: fxError, reload: reloadFx } = useTenantExchangeRates(tenant?.id);
 
@@ -420,25 +427,61 @@ export function DailyClosingPage() {
     setManualRates((prev) => ({ ...prev, [code]: value }));
   };
 
+  // Fetches a mid-market rate for `code -> base` from open.er-api.com (free,
+  // no API key) and caches it. Runs automatically for any currency that
+  // isn't configured in Forex Trading.
+  const fetchLiveRate = useCallback(async (code: string, base: string) => {
+    const key = `${code}->${base}`;
+    setLiveRateLoading((prev) => ({ ...prev, [key]: true }));
+    setLiveRateError((prev) => {
+      if (!(key in prev)) return prev;
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+    try {
+      const res = await fetch(`https://open.er-api.com/v6/latest/${code}`);
+      if (!res.ok) throw new Error(`Rate service returned ${res.status}`);
+      const data = await res.json();
+      const rate = data?.rates?.[base];
+      if (typeof rate !== 'number') throw new Error(`No live rate available for ${code}/${base}`);
+      setLiveRates((prev) => ({ ...prev, [key]: rate }));
+    } catch (err) {
+      console.error(`Error fetching live rate for ${key}:`, err);
+      setLiveRateError((prev) => ({
+        ...prev,
+        [key]: err instanceof Error ? err.message : 'Failed to fetch live rate',
+      }));
+    } finally {
+      setLiveRateLoading((prev) => ({ ...prev, [key]: false }));
+    }
+  }, []);
+
   const resolvedRate = useCallback(
     (code: string): number | null => {
       if (code === baseCurrency) return 1;
       const fx = lookupRate(fxRates, code, baseCurrency, 'buy');
       if (fx !== null) return fx;
+      const liveKey = `${code}->${baseCurrency}`;
+      if (liveRates[liveKey] !== undefined) return liveRates[liveKey];
       const manual = parseFloat(manualRates[code] ?? '');
       return Number.isFinite(manual) && manual > 0 ? manual : null;
     },
-    [fxRates, baseCurrency, manualRates]
+    [fxRates, baseCurrency, manualRates, liveRates]
   );
 
   const rateSource = useCallback(
-    (code: string): 'base' | 'forex' | 'manual' | 'missing' => {
+    (code: string): 'base' | 'forex' | 'live' | 'loading' | 'manual' | 'missing' => {
       if (code === baseCurrency) return 'base';
       if (lookupRate(fxRates, code, baseCurrency, 'buy') !== null) return 'forex';
+      const liveKey = `${code}->${baseCurrency}`;
+      if (liveRates[liveKey] !== undefined) return 'live';
+      if (liveRateLoading[liveKey]) return 'loading';
       const manual = parseFloat(manualRates[code] ?? '');
-      return Number.isFinite(manual) && manual > 0 ? 'manual' : 'missing';
+      if (Number.isFinite(manual) && manual > 0) return 'manual';
+      return 'missing';
     },
-    [fxRates, baseCurrency, manualRates]
+    [fxRates, baseCurrency, manualRates, liveRates, liveRateLoading]
   );
 
   const currenciesInUse = useMemo(() => {
@@ -449,6 +492,32 @@ export function DailyClosingPage() {
 
   const currenciesNeedingRates = currenciesInUse.filter((c) => c !== baseCurrency);
   const missingRateCurrencies = currenciesNeedingRates.filter((c) => rateSource(c) === 'missing');
+
+  // Auto-fetch a live rate for any currency Forex Trading doesn't have
+  // configured. Skips pairs already cached, loading, or already failed —
+  // the Refresh button retries failures explicitly.
+  useEffect(() => {
+    currenciesNeedingRates.forEach((code) => {
+      if (lookupRate(fxRates, code, baseCurrency, 'buy') !== null) return;
+      const key = `${code}->${baseCurrency}`;
+      if (liveRates[key] !== undefined) return;
+      if (liveRateLoading[key]) return;
+      if (liveRateError[key]) return;
+      fetchLiveRate(code, baseCurrency);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currenciesNeedingRates.join(','), fxRates, baseCurrency]);
+
+  const handleRefreshRates = useCallback(() => {
+    reloadFx();
+    currenciesNeedingRates.forEach((code) => {
+      if (lookupRate(fxRates, code, baseCurrency, 'buy') !== null) return;
+      const key = `${code}->${baseCurrency}`;
+      if (liveRateLoading[key]) return;
+      fetchLiveRate(code, baseCurrency);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reloadFx, currenciesNeedingRates.join(','), fxRates, baseCurrency, fetchLiveRate]);
 
   const openingTotal = useMemo(() => {
     if (!todaysOp) return 0;
@@ -709,7 +778,7 @@ export function DailyClosingPage() {
             <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
               <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between gap-3 flex-wrap">
                 <h3 className="font-semibold text-slate-900">Today&rsquo;s Rates (from Forex Trading)</h3>
-                <LiveRatesBadge lastUpdated={lastRatesUpdate} loading={fxLoading} onRefresh={reloadFx} />
+                <LiveRatesBadge lastUpdated={lastRatesUpdate} loading={fxLoading} onRefresh={handleRefreshRates} />
               </div>
               {fxError && (
                 <div className="mx-6 mt-4 p-3 bg-[#c46040]/10 border border-[#c46040]/30 rounded-lg text-[#c46040] text-sm break-words">
@@ -720,6 +789,9 @@ export function DailyClosingPage() {
                 {currenciesNeedingRates.map((code) => {
                   const source = rateSource(code);
                   const fx = lookupRate(fxRates, code, baseCurrency, 'buy');
+                  const liveKey = `${code}->${baseCurrency}`;
+                  const liveValue = liveRates[liveKey];
+                  const liveErr = liveRateError[liveKey];
                   return (
                     <div key={code} className="border border-slate-200 rounded-lg p-3 min-w-0 transition-all hover:shadow-sm">
                       <div className="flex items-center justify-between gap-2 mb-1.5">
@@ -731,6 +803,18 @@ export function DailyClosingPage() {
                         {source === 'forex' && (
                           <span className="text-[10px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded bg-[#1ebcb2]/10 text-[#1ebcb2] shrink-0">
                             Forex
+                          </span>
+                        )}
+                        {source === 'live' && (
+                          <span className="inline-flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded bg-sky-100 text-sky-700 shrink-0">
+                            <Globe className="w-2.5 h-2.5" />
+                            Live API
+                          </span>
+                        )}
+                        {source === 'loading' && (
+                          <span className="inline-flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded bg-slate-100 text-slate-500 shrink-0">
+                            <Loader2 className="w-2.5 h-2.5 animate-spin" />
+                            Fetching
                           </span>
                         )}
                         {source === 'manual' && (
@@ -748,16 +832,44 @@ export function DailyClosingPage() {
                         <p className="text-lg font-bold text-slate-900">
                           {fx.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 6 })}
                         </p>
+                      ) : source === 'live' && liveValue !== undefined ? (
+                        <div>
+                          <p className="text-lg font-bold text-slate-900">
+                            {liveValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 6 })}
+                          </p>
+                          <p className="text-[11px] text-slate-400 mt-0.5">
+                            Auto-fetched &middot; not yet saved in Forex Trading
+                          </p>
+                        </div>
+                      ) : source === 'loading' ? (
+                        <div className="flex items-center gap-2 py-1.5 text-sm text-slate-400">
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                          Fetching live rate&hellip;
+                        </div>
                       ) : (
-                        <input
-                          type="number"
-                          step="0.000001"
-                          min="0"
-                          value={manualRates[code] ?? ''}
-                          onChange={(e) => updateManualRate(code, e.target.value)}
-                          placeholder="Enter rate manually"
-                          className="w-full min-w-0 box-border px-3 py-2 border border-slate-300 rounded-md text-sm font-medium focus:outline-none focus:ring-2 focus:ring-[#1ebcb2] focus:border-transparent"
-                        />
+                        <div className="space-y-1">
+                          <input
+                            type="number"
+                            step="0.000001"
+                            min="0"
+                            value={manualRates[code] ?? ''}
+                            onChange={(e) => updateManualRate(code, e.target.value)}
+                            placeholder="Enter rate manually"
+                            className="w-full min-w-0 box-border px-3 py-2 border border-slate-300 rounded-md text-sm font-medium focus:outline-none focus:ring-2 focus:ring-[#1ebcb2] focus:border-transparent"
+                          />
+                          <p className="text-xs text-slate-400 flex items-start gap-1">
+                            <AlertTriangle className="w-3 h-3 flex-shrink-0 mt-0.5" />
+                            {liveErr ? `Live lookup failed (${liveErr}). Enter manually, or ` : 'Not configured in Forex Trading. '}
+                            <button
+                              type="button"
+                              onClick={() => fetchLiveRate(code, baseCurrency)}
+                              className="text-[#1ebcb2] hover:underline font-medium"
+                            >
+                              retry live fetch
+                            </button>
+                            .
+                          </p>
+                        </div>
                       )}
                     </div>
                   );
