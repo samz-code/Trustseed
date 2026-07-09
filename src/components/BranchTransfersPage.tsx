@@ -17,6 +17,11 @@ import {
   Send,
 } from 'lucide-react';
 import { buildApprovalChain } from '../lib/approvalChain';
+import {
+  CURRENCY_OPTIONS,
+  formatMoney,
+  currencyFlag,
+} from '../lib/accountCurrencies';
 
 type Transaction = Tables<'transactions'>;
 type TransferStatus = Transaction['status'];
@@ -27,20 +32,6 @@ interface BranchTransferForm {
   currency: string;
   purpose: string;
   notes: string;
-}
-
-const EMPTY_FORM: BranchTransferForm = {
-  to_branch_id: '',
-  amount: '',
-  currency: 'KES',
-  purpose: '',
-  notes: '',
-};
-
-function formatMoney(value: number, currency = 'KES'): string {
-  const symbols: Record<string, string> = { USD: '$', KES: 'KSh ', SSP: 'SSP ', EUR: '\u20ac', GBP: '\u00a3' };
-  const symbol = symbols[currency] ?? `${currency} `;
-  return `${symbol}${value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
 function getToBranchId(metadata: Json): string | null {
@@ -54,14 +45,39 @@ function getToBranchId(metadata: Json): string | null {
 export function BranchTransfersPage() {
   const { tenant, branch, branches, admin } = useAuth();
 
+  // Institution currency configuration, shared with Daily Operations etc.
+  const baseCurrency =
+    (tenant?.settings as { base_currency?: string; default_currency?: string } | undefined)?.base_currency ??
+    tenant?.settings?.default_currency ??
+    'KES';
+
+  // Currencies the institution actually uses, falling back to the full list.
+  const enabledCurrencies = useMemo(() => {
+    const enabled = (tenant?.settings as { enabled_currencies?: string[] } | undefined)?.enabled_currencies;
+    const codes = enabled && enabled.length > 0 ? enabled : CURRENCY_OPTIONS.map((c) => c.code);
+    // Preserve the canonical ordering from CURRENCY_OPTIONS, then append any
+    // configured currency that isn't in the canonical list (defensive).
+    const known = CURRENCY_OPTIONS.filter((c) => codes.includes(c.code));
+    const extra = codes
+      .filter((code) => !CURRENCY_OPTIONS.some((c) => c.code === code))
+      .map((code) => ({ code, name: code, symbol: `${code} `, flag: currencyFlag(code) }));
+    return [...known, ...extra];
+  }, [tenant]);
+
+  const emptyForm = useMemo<BranchTransferForm>(
+    () => ({ to_branch_id: '', amount: '', currency: baseCurrency, purpose: '', notes: '' }),
+    [baseCurrency]
+  );
+
   const [transfers, setTransfers] = useState<Transaction[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | TransferStatus>('all');
+  const [currencyFilter, setCurrencyFilter] = useState<'all' | string>('all');
 
   const [showForm, setShowForm] = useState(false);
-  const [formData, setFormData] = useState<BranchTransferForm>(EMPTY_FORM);
+  const [formData, setFormData] = useState<BranchTransferForm>(emptyForm);
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [actioningId, setActioningId] = useState<string | null>(null);
@@ -92,16 +108,27 @@ export function BranchTransfersPage() {
     loadTransfers();
   }, [loadTransfers]);
 
-  const branchName = (id: string | null): string => {
-    if (!id) return 'Unknown branch';
-    const b = branches.find((br) => br.id === id);
-    return b ? b.name : 'Unknown branch';
-  };
+  const branchName = useCallback(
+    (id: string | null): string => {
+      if (!id) return 'Unknown branch';
+      const b = branches.find((br) => br.id === id);
+      return b ? b.name : 'Unknown branch';
+    },
+    [branches]
+  );
+
+  // Currencies present in the loaded data, so the filter only offers real ones.
+  const currenciesInData = useMemo(() => {
+    const set = new Set<string>();
+    transfers.forEach((t) => t.currency && set.add(t.currency));
+    return Array.from(set).sort();
+  }, [transfers]);
 
   const filteredTransfers = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     return transfers.filter((t) => {
       const matchesStatus = statusFilter === 'all' || t.status === statusFilter;
+      const matchesCurrency = currencyFilter === 'all' || t.currency === currencyFilter;
       const toBranch = branchName(getToBranchId(t.metadata)).toLowerCase();
       const fromBranch = branchName(t.branch_id).toLowerCase();
       const matchesSearch =
@@ -109,10 +136,9 @@ export function BranchTransfersPage() {
         t.reference.toLowerCase().includes(q) ||
         toBranch.includes(q) ||
         fromBranch.includes(q);
-      return matchesStatus && matchesSearch;
+      return matchesStatus && matchesCurrency && matchesSearch;
     });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [transfers, searchQuery, statusFilter, branches]);
+  }, [transfers, searchQuery, statusFilter, currencyFilter, branchName]);
 
   const otherBranches = branches.filter((b) => b.id !== branch?.id);
 
@@ -120,6 +146,7 @@ export function BranchTransfersPage() {
     if (!branch) return 'No branch selected. Please select a branch first.';
     if (!formData.to_branch_id) return 'Please select a destination branch.';
     if (formData.to_branch_id === branch.id) return 'Destination branch must be different from the source branch.';
+    if (!formData.currency) return 'Please choose a currency.';
     const amount = parseFloat(formData.amount);
     if (!formData.amount || Number.isNaN(amount) || amount <= 0) {
       return 'Please enter a valid transfer amount.';
@@ -128,14 +155,14 @@ export function BranchTransfersPage() {
   };
 
   const openForm = () => {
-    setFormData(EMPTY_FORM);
+    setFormData(emptyForm);
     setFormError(null);
     setShowForm(true);
   };
 
   const closeForm = () => {
     setShowForm(false);
-    setFormData(EMPTY_FORM);
+    setFormData(emptyForm);
     setFormError(null);
   };
 
@@ -326,6 +353,18 @@ export function BranchTransfersPage() {
             <option value="completed">Completed</option>
             <option value="cancelled">Cancelled</option>
           </select>
+          <select
+            value={currencyFilter}
+            onChange={(e) => setCurrencyFilter(e.target.value)}
+            className="px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#1ebcb2] focus:border-transparent"
+          >
+            <option value="all">All Currencies</option>
+            {currenciesInData.map((code) => (
+              <option key={code} value={code}>
+                {currencyFlag(code)} {code}
+              </option>
+            ))}
+          </select>
         </div>
       </div>
 
@@ -342,17 +381,23 @@ export function BranchTransfersPage() {
                 <div key={transfer.id} className="px-6 py-4 hover:bg-slate-50 transition-colors">
                   <div className="flex items-start justify-between gap-4">
                     <div className="min-w-0">
-                      <div className="flex items-center gap-3">
+                      <div className="flex items-center gap-3 flex-wrap">
                         <span className="font-mono text-sm text-slate-500">{transfer.reference}</span>
                         {getStatusBadge(transfer.status)}
+                        <span className="inline-flex items-center gap-1 text-xs font-medium text-slate-500">
+                          <span aria-hidden>{currencyFlag(transfer.currency)}</span>
+                          {transfer.currency}
+                        </span>
                       </div>
-                      <p className="font-semibold text-slate-900 mt-1 flex items-center gap-2">
+                      <p className="font-semibold text-slate-900 mt-1 flex items-center gap-2 flex-wrap">
                         <Building className="w-4 h-4 text-[#641f60]" />
                         {branchName(transfer.branch_id)}
                         <ArrowRight className="w-4 h-4 text-slate-400" />
                         {branchName(getToBranchId(transfer.metadata))}
                       </p>
-                      <p className="text-sm text-slate-600">{formatMoney(transfer.amount, transfer.currency)}</p>
+                      <p className="text-sm text-slate-600">
+                        {currencyFlag(transfer.currency)} {formatMoney(transfer.amount, transfer.currency)}
+                      </p>
                       {transfer.purpose && <p className="text-sm text-slate-500 mt-1">{transfer.purpose}</p>}
                     </div>
                     {canAct && (
@@ -391,7 +436,7 @@ export function BranchTransfersPage() {
             </div>
             <h3 className="text-lg font-semibold text-slate-900 mb-1">No branch transfers found</h3>
             <p className="text-slate-500 text-center max-w-sm">
-              {searchQuery || statusFilter !== 'all'
+              {searchQuery || statusFilter !== 'all' || currencyFilter !== 'all'
                 ? 'No transfers match your search or filter.'
                 : 'Create a transfer to move funds between branches.'}
             </p>
@@ -439,15 +484,20 @@ export function BranchTransfersPage() {
               <div className="grid grid-cols-2 gap-4">
                 <div>
                   <label className="block text-sm font-medium text-slate-700 mb-1">Amount *</label>
-                  <input
-                    type="number"
-                    step="0.01"
-                    min="0"
-                    required
-                    value={formData.amount}
-                    onChange={(e) => setFormData((prev) => ({ ...prev, amount: e.target.value }))}
-                    className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#1ebcb2] focus:border-transparent"
-                  />
+                  <div className="relative">
+                    <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-sm">
+                      {currencyFlag(formData.currency)}
+                    </span>
+                    <input
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      required
+                      value={formData.amount}
+                      onChange={(e) => setFormData((prev) => ({ ...prev, amount: e.target.value }))}
+                      className="w-full pl-9 pr-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#1ebcb2] focus:border-transparent"
+                    />
+                  </div>
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-slate-700 mb-1">Currency</label>
@@ -456,10 +506,11 @@ export function BranchTransfersPage() {
                     onChange={(e) => setFormData((prev) => ({ ...prev, currency: e.target.value }))}
                     className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#1ebcb2] focus:border-transparent"
                   >
-                    <option value="KES">KES</option>
-                    <option value="USD">USD</option>
-                    <option value="SSP">SSP</option>
-                    <option value="UGX">UGX</option>
+                    {enabledCurrencies.map((c) => (
+                      <option key={c.code} value={c.code}>
+                        {c.flag} {c.code}
+                      </option>
+                    ))}
                   </select>
                 </div>
               </div>

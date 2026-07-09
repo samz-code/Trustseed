@@ -1,9 +1,16 @@
-﻿import React, { useState, useEffect, useCallback, useMemo } from 'react';
+﻿import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { supabase } from '../lib/supabase';
 import type { Tables, Json } from '../lib/supabase';
 import type { TenantSettings } from '../types';
 import { useTenantExchangeRates, lookupRate } from '../lib/forexRates';
+import {
+  type AccountCurrencyMap,
+  currencyForKey,
+  formatMoney,
+  labelForKey,
+  resolveAccountCurrencies,
+} from '../lib/accountCurrencies';
 import {
   Sunset,
   Loader2,
@@ -21,6 +28,159 @@ import {
   Coins,
 } from 'lucide-react';
 
+// ============================================================================
+// Real flag badges — inline SVG instead of emoji flags, which render as
+// plain two-letter codes on Windows / some Android browsers. Shared visual
+// language with Transactions/Transfers/Wallets/DailyOpening pages.
+// ============================================================================
+
+function FlagGraphic({ code }: { code: string }) {
+  switch (code) {
+    case 'USD':
+      return (
+        <>
+          <rect width="40" height="40" fill="#b22234" />
+          <rect y="3.08" width="40" height="3.08" fill="#fff" />
+          <rect y="9.23" width="40" height="3.08" fill="#fff" />
+          <rect y="15.38" width="40" height="3.08" fill="#fff" />
+          <rect y="21.54" width="40" height="3.08" fill="#fff" />
+          <rect y="27.69" width="40" height="3.08" fill="#fff" />
+          <rect y="33.85" width="40" height="3.08" fill="#fff" />
+          <rect width="18" height="21.54" fill="#3c3b6e" />
+          <g fill="#fff">
+            {[4, 10, 16].map((y) =>
+              [3, 7, 11, 15].map((x) => <circle key={`${x}-${y}`} cx={x} cy={y} r="1" />)
+            )}
+          </g>
+        </>
+      );
+    case 'KES':
+      return (
+        <>
+          <rect width="40" height="10" fill="#000" />
+          <rect y="10" width="40" height="4" fill="#fff" />
+          <rect y="14" width="40" height="12" fill="#bb0000" />
+          <rect y="26" width="40" height="4" fill="#fff" />
+          <rect y="30" width="40" height="10" fill="#006600" />
+          <ellipse cx="20" cy="20" rx="4.5" ry="8" fill="#fff" />
+          <ellipse cx="20" cy="20" rx="3" ry="6.5" fill="#bb0000" />
+          <path d="M20 11 L21.5 20 L20 29 L18.5 20 Z" fill="#000" />
+        </>
+      );
+    case 'SSP':
+      return (
+        <>
+          <rect width="40" height="12" fill="#000" />
+          <rect y="12" width="40" height="2" fill="#fff" />
+          <rect y="14" width="40" height="12" fill="#bb0000" />
+          <rect y="26" width="40" height="2" fill="#fff" />
+          <rect y="28" width="40" height="12" fill="#009543" />
+          <path d="M0 0 L20 20 L0 40 Z" fill="#0f47af" />
+          <path d="M4 20 l5.5 -1.8 -3.4 4.7 0 -5.8 3.4 4.7 z" fill="#fcdd09" />
+        </>
+      );
+    case 'UGX':
+      return (
+        <>
+          <rect width="40" height="6.67" fill="#000" />
+          <rect y="6.67" width="40" height="6.67" fill="#fcdc04" />
+          <rect y="13.33" width="40" height="6.67" fill="#d90000" />
+          <rect y="20" width="40" height="6.67" fill="#000" />
+          <rect y="26.67" width="40" height="6.67" fill="#fcdc04" />
+          <rect y="33.33" width="40" height="6.67" fill="#d90000" />
+          <circle cx="20" cy="20" r="6" fill="#fff" />
+          <circle cx="20" cy="20" r="5.4" fill="none" stroke="#000" strokeWidth="0.4" />
+        </>
+      );
+    case 'TZS':
+      return (
+        <>
+          <path d="M0 0 H40 V40 H0 Z" fill="#1eb53a" />
+          <path d="M40 0 V40 H0 Z" fill="#00a3dd" />
+          <path d="M0 40 L40 0 v6 L6 40 Z" fill="#fcd116" />
+          <path d="M0 40 L40 0 h-6 L0 34 Z" fill="#fcd116" />
+          <path d="M0 34 L34 0 h-34 Z M40 6 L6 40 h34 Z" fill="#000" />
+        </>
+      );
+    case 'RWF':
+      return (
+        <>
+          <rect width="40" height="40" fill="#20603d" />
+          <rect width="40" height="26.67" fill="#00a1de" />
+          <rect y="20" width="40" height="6.67" fill="#fad201" />
+          <circle cx="31" cy="9" r="5" fill="#fad201" />
+          {Array.from({ length: 24 }).map((_, i) => {
+            const angle = (i * 15 * Math.PI) / 180;
+            const x1 = 31 + 4 * Math.sin(angle);
+            const y1 = 9 - 4 * Math.cos(angle);
+            const x2 = 31 + 5 * Math.sin(angle);
+            const y2 = 9 - 5 * Math.cos(angle);
+            return <line key={i} x1={x1} y1={y1} x2={x2} y2={y2} stroke="#e5be01" strokeWidth="0.6" />;
+          })}
+        </>
+      );
+    case 'EUR':
+      return (
+        <>
+          <rect width="40" height="40" fill="#003399" />
+          <g fill="#ffcc00">
+            {Array.from({ length: 12 }).map((_, i) => {
+              const angle = (i * 30 * Math.PI) / 180;
+              const cx = 20 + 11 * Math.sin(angle);
+              const cy = 20 - 11 * Math.cos(angle);
+              return <circle key={i} cx={cx} cy={cy} r="1.6" />;
+            })}
+          </g>
+        </>
+      );
+    case 'GBP':
+      return (
+        <>
+          <rect width="40" height="40" fill="#012169" />
+          <path d="M0 0 L40 40 M40 0 L0 40" stroke="#fff" strokeWidth="6" />
+          <path d="M0 0 L40 40 M40 0 L0 40" stroke="#c8102e" strokeWidth="3" />
+          <path d="M20 0 V40 M0 20 H40" stroke="#fff" strokeWidth="10" />
+          <path d="M20 0 V40 M0 20 H40" stroke="#c8102e" strokeWidth="6" />
+        </>
+      );
+    default:
+      return (
+        <>
+          <rect width="40" height="40" fill="#64748b" />
+          <text
+            x="20"
+            y="21"
+            textAnchor="middle"
+            dominantBaseline="central"
+            fontSize="14"
+            fontWeight="700"
+            fill="#fff"
+            fontFamily="system-ui, sans-serif"
+          >
+            {code.slice(0, 2)}
+          </text>
+        </>
+      );
+  }
+}
+
+function CurrencyBadge({ code, size = 16 }: { code: string; size?: number }) {
+  const clipId = `daily-close-flag-${code}`;
+  return (
+    <svg width={size} height={size} viewBox="0 0 40 40" role="img" aria-label={`${code} flag`} className="flex-shrink-0">
+      <defs>
+        <clipPath id={clipId}>
+          <circle cx="20" cy="20" r="20" />
+        </clipPath>
+      </defs>
+      <g clipPath={`url(#${clipId})`}>
+        <FlagGraphic code={code} />
+      </g>
+      <circle cx="20" cy="20" r="19" fill="none" stroke="#00000022" strokeWidth="2" />
+    </svg>
+  );
+}
+
 type DailyOperation = Tables<'daily_operations'>;
 
 interface BalanceRow {
@@ -29,37 +189,18 @@ interface BalanceRow {
   amount: string;
 }
 
-const CURRENCY_SYMBOL_MAP: Record<string, string> = {
-  KES: 'KSh',
-  UGX: 'USh',
-  SSP: 'SSP',
-  TZS: 'TSh',
-  RWF: 'RWF',
-  USD: '$',
-  EUR: '\u20ac',
-  GBP: '\u00a3',
-};
-
 type TenantSettingsShape = Partial<TenantSettings> & {
   base_currency?: string;
+  account_currencies?: AccountCurrencyMap;
   [key: string]: unknown;
 };
 
+// Real-time forex: poll in the background on top of the manual refresh
+// button, so a variance check at closing is never made against a stale rate.
+const AUTO_REFRESH_INTERVAL_MS = 45_000;
+
 function todayIso(): string {
   return new Date().toISOString().slice(0, 10);
-}
-
-function formatMoney(value: number, currency = 'KES'): string {
-  const symbol = CURRENCY_SYMBOL_MAP[currency] ?? `${currency} `;
-  return `${symbol}${value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-}
-
-function currencyPrefix(key: string): string {
-  return key.startsWith('cash_') ? key.slice(5) : 'KES';
-}
-
-function currencyForRow(key: string, baseCurrency: string): string {
-  return key.startsWith('cash_') ? key.slice(5) : baseCurrency;
 }
 
 function ChannelIcon({ channelKey, className }: { channelKey: string; className?: string }) {
@@ -67,6 +208,15 @@ function ChannelIcon({ channelKey, className }: { channelKey: string; className?
   if (channelKey === 'bank') return <Landmark className={className} />;
   if (channelKey === 'mtn_momo' || channelKey === 'mpesa') return <Smartphone className={className} />;
   return <Wallet className={className} />;
+}
+
+// Distinct brand-color accent per channel type instead of every card being
+// flat white — cash = teal, mobile money = orange, bank = purple.
+function channelAccent(key: string): { border: string; iconBg: string; iconColor: string } {
+  if (key.startsWith('cash_')) return { border: 'border-t-[#1ebcb2]', iconBg: 'bg-[#1ebcb2]/10', iconColor: 'text-[#1ebcb2]' };
+  if (key === 'mtn_momo' || key === 'mpesa') return { border: 'border-t-[#ee7b22]', iconBg: 'bg-[#ee7b22]/10', iconColor: 'text-[#ee7b22]' };
+  if (key === 'bank') return { border: 'border-t-[#641f60]', iconBg: 'bg-[#641f60]/10', iconColor: 'text-[#641f60]' };
+  return { border: 'border-t-slate-300', iconBg: 'bg-slate-100', iconColor: 'text-slate-500' };
 }
 
 function parseBalances(json: Json): Record<string, number> {
@@ -79,12 +229,6 @@ function parseBalances(json: Json): Record<string, number> {
     return out;
   }
   return {};
-}
-
-function labelFor(key: string): string {
-  if (key.startsWith('cash_')) return `Cash (${key.slice(5)})`;
-  const map: Record<string, string> = { bank: 'Bank', mtn_momo: 'MTN Mobile Money', mpesa: 'M-Pesa' };
-  return map[key] ?? key.replace(/_/g, ' ');
 }
 
 function StatusPill({ state }: { state: 'unopened' | 'active' | 'closed' }) {
@@ -102,6 +246,63 @@ function StatusPill({ state }: { state: 'unopened' | 'active' | 'closed' }) {
     <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium border ${styles[state]}`}>
       {labels[state]}
     </span>
+  );
+}
+
+// --- Live rates indicator ----------------------------------------------------
+
+function useTicker(intervalMs = 1000) {
+  const [, forceTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => forceTick((t) => t + 1), intervalMs);
+    return () => clearInterval(id);
+  }, [intervalMs]);
+}
+
+function elapsedLabel(sinceMs: number | null): string {
+  if (sinceMs === null) return 'never';
+  const seconds = Math.max(0, Math.floor((Date.now() - sinceMs) / 1000));
+  if (seconds < 5) return 'just now';
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h ago`;
+}
+
+function LiveRatesBadge({
+  lastUpdated,
+  loading,
+  onRefresh,
+}: {
+  lastUpdated: number | null;
+  loading: boolean;
+  onRefresh: () => void;
+}) {
+  useTicker(1000);
+  return (
+    <div className="flex items-center gap-2 flex-wrap shrink-0">
+      <span className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-full text-xs font-medium bg-[#1ebcb2]/10 text-[#1ebcb2]">
+        <span className="relative flex h-2 w-2">
+          <span
+            className={`absolute inline-flex h-full w-full rounded-full bg-[#1ebcb2] opacity-75 ${
+              loading ? 'animate-ping' : 'animate-pulse'
+            }`}
+          />
+          <span className="relative inline-flex rounded-full h-2 w-2 bg-[#1ebcb2]" />
+        </span>
+        Live &middot; {loading ? 'updating…' : `updated ${elapsedLabel(lastUpdated)}`}
+      </span>
+      <button
+        type="button"
+        onClick={onRefresh}
+        disabled={loading}
+        className="inline-flex items-center gap-2 px-3 py-1.5 text-sm font-medium rounded-lg border border-slate-200 text-slate-600 hover:border-[#641f60] hover:text-[#641f60] disabled:opacity-50 transition-all"
+      >
+        {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+        Refresh
+      </button>
+    </div>
   );
 }
 
@@ -124,11 +325,33 @@ export function DailyClosingPage() {
 
   const { rates: fxRates, loading: fxLoading, error: fxError, reload: reloadFx } = useTenantExchangeRates(tenant?.id);
 
+  // --- Real-time forex: poll in the background + track "updated Xs ago" ----
+  const [lastRatesUpdate, setLastRatesUpdate] = useState<number | null>(null);
+  const prevFxLoadingRef = useRef(fxLoading);
+  useEffect(() => {
+    if (prevFxLoadingRef.current && !fxLoading) setLastRatesUpdate(Date.now());
+    prevFxLoadingRef.current = fxLoading;
+  }, [fxLoading]);
+
+  const reloadFxRef = useRef(reloadFx);
+  useEffect(() => {
+    reloadFxRef.current = reloadFx;
+  }, [reloadFx]);
+  useEffect(() => {
+    const id = setInterval(() => reloadFxRef.current(), AUTO_REFRESH_INTERVAL_MS);
+    return () => clearInterval(id);
+  }, []);
+
   const tenantSettings = useMemo<TenantSettingsShape>(
     () => (tenant?.settings ?? {}) as TenantSettingsShape,
     [tenant]
   );
   const baseCurrency = tenantSettings.base_currency ?? tenantSettings.default_currency ?? 'KES';
+
+  const accountCurrencies = useMemo(
+    () => resolveAccountCurrencies(tenantSettings.account_currencies, baseCurrency),
+    [tenantSettings, baseCurrency]
+  );
 
   const loadState = useCallback(async () => {
     if (!tenant || !branch) return;
@@ -152,7 +375,7 @@ export function DailyClosingPage() {
         setRows(
           Object.entries(opening).map(([key, value]) => ({
             key,
-            label: labelFor(key),
+            label: labelForKey(key),
             amount: String(value),
           }))
         );
@@ -220,11 +443,9 @@ export function DailyClosingPage() {
 
   const currenciesInUse = useMemo(() => {
     const codes = new Set<string>();
-    rows.forEach((r) => {
-      if (r.key.startsWith('cash_')) codes.add(r.key.slice(5));
-    });
+    rows.forEach((r) => codes.add(currencyForKey(r.key, accountCurrencies, baseCurrency)));
     return Array.from(codes).sort();
-  }, [rows]);
+  }, [rows, accountCurrencies, baseCurrency]);
 
   const currenciesNeedingRates = currenciesInUse.filter((c) => c !== baseCurrency);
   const missingRateCurrencies = currenciesNeedingRates.filter((c) => rateSource(c) === 'missing');
@@ -233,21 +454,21 @@ export function DailyClosingPage() {
     if (!todaysOp) return 0;
     const opening = parseBalances(todaysOp.opening_balances);
     return Object.entries(opening).reduce((sum, [key, value]) => {
-      const code = currencyForRow(key, baseCurrency);
+      const code = currencyForKey(key, accountCurrencies, baseCurrency);
       const rate = resolvedRate(code);
       return sum + value * (rate ?? 0);
     }, 0);
-  }, [todaysOp, baseCurrency, resolvedRate]);
+  }, [todaysOp, accountCurrencies, baseCurrency, resolvedRate]);
 
   const closingTotal = useMemo(
     () =>
       rows.reduce((sum, r) => {
         const amt = parseFloat(r.amount) || 0;
-        const code = currencyForRow(r.key, baseCurrency);
+        const code = currencyForKey(r.key, accountCurrencies, baseCurrency);
         const rate = resolvedRate(code);
         return sum + amt * (rate ?? 0);
       }, 0),
-    [rows, baseCurrency, resolvedRate]
+    [rows, accountCurrencies, baseCurrency, resolvedRate]
   );
 
   const expectedTotal = useMemo(
@@ -342,36 +563,44 @@ export function DailyClosingPage() {
 
   return (
     <div className="space-y-6 max-w-4xl min-w-0">
-      <div className="space-y-1">
-        <div className="flex items-center gap-3 flex-wrap">
-          <h1 className="text-2xl font-bold text-[#641f60]">Daily Closing</h1>
-          {branch && <StatusPill state={pageStatus} />}
-        </div>
-        <p className="text-slate-600">
-          {branch
-            ? `${branch.name} — ${new Date().toLocaleDateString(undefined, {
-                weekday: 'long',
-                month: 'long',
-                day: 'numeric',
-              })}`
-            : 'Select a branch to continue'}
-        </p>
-        {currenciesInUse.length > 0 && (
-          <div className="flex flex-wrap items-center gap-1.5 pt-1">
-            <Coins className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-            {currenciesInUse.map((code) => (
-              <span
-                key={code}
-                className={`text-xs font-medium px-2 py-0.5 rounded-full ${
-                  code === baseCurrency ? 'bg-[#641f60]/10 text-[#641f60]' : 'bg-[#1ebcb2]/10 text-[#1ebcb2]'
-                }`}
-              >
-                {code}
-                {code === baseCurrency ? ' (base)' : ''}
-              </span>
-            ))}
+      <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
+        <div className="flex items-start gap-4 min-w-0">
+          <div className="p-3.5 rounded-2xl bg-gradient-to-br from-[#641f60] to-[#4a1646] text-white shadow-lg shrink-0">
+            <Sunset className="w-7 h-7" />
           </div>
-        )}
+          <div className="min-w-0">
+            <div className="flex items-center gap-3 flex-wrap">
+              <h1 className="text-2xl font-bold text-[#641f60]">Daily Closing</h1>
+              {branch && <StatusPill state={pageStatus} />}
+            </div>
+            <p className="text-slate-600 mt-1">
+              {branch
+                ? `${branch.name} — ${new Date().toLocaleDateString(undefined, {
+                    weekday: 'long',
+                    month: 'long',
+                    day: 'numeric',
+                  })}`
+                : 'Select a branch to continue'}
+            </p>
+            {currenciesInUse.length > 0 && (
+              <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                <Coins className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                {currenciesInUse.map((code) => (
+                  <span
+                    key={code}
+                    className={`inline-flex items-center gap-1.5 text-xs font-medium pl-1.5 pr-2 py-0.5 rounded-full ${
+                      code === baseCurrency ? 'bg-[#641f60]/10 text-[#641f60]' : 'bg-[#1ebcb2]/10 text-[#1ebcb2]'
+                    }`}
+                  >
+                    <CurrencyBadge code={code} size={14} />
+                    {code}
+                    {code === baseCurrency ? ' (base)' : ''}
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
       </div>
 
       {loadError && (
@@ -420,17 +649,23 @@ export function DailyClosingPage() {
           <div className="p-6">
             <h4 className="text-sm font-semibold text-slate-700 mb-3">Closing Balances</h4>
             <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
-              {Object.entries(parseBalances(todaysOp.closing_balances)).map(([key, value]) => (
-                <div key={key} className="border border-slate-200 rounded-xl bg-white shadow-sm p-4 text-center min-w-0">
-                  <div className="w-9 h-9 rounded-full bg-slate-50 flex items-center justify-center mx-auto mb-2">
-                    <ChannelIcon channelKey={key} className="w-4 h-4 text-slate-400" />
+              {Object.entries(parseBalances(todaysOp.closing_balances)).map(([key, value]) => {
+                const accent = channelAccent(key);
+                return (
+                  <div
+                    key={key}
+                    className={`border border-slate-200 border-t-4 ${accent.border} rounded-xl bg-white shadow-sm p-4 text-center min-w-0`}
+                  >
+                    <div className={`w-9 h-9 rounded-full ${accent.iconBg} flex items-center justify-center mx-auto mb-2`}>
+                      <ChannelIcon channelKey={key} className={`w-4 h-4 ${accent.iconColor}`} />
+                    </div>
+                    <p className="text-xs text-slate-500 mb-1 truncate">{labelForKey(key)}</p>
+                    <p className="font-semibold text-slate-900 text-sm break-words">
+                      {formatMoney(value, currencyForKey(key, accountCurrencies, baseCurrency))}
+                    </p>
                   </div>
-                  <p className="text-xs text-slate-500 mb-1 truncate">{labelFor(key)}</p>
-                  <p className="font-semibold text-slate-900 text-sm break-words">
-                    {formatMoney(value, currencyPrefix(key))}
-                  </p>
-                </div>
-              ))}
+                );
+              })}
             </div>
             {todaysOp.notes && (
               <div className="mt-4 flex items-start gap-2 text-sm text-[#c46040]">
@@ -443,14 +678,14 @@ export function DailyClosingPage() {
       ) : (
         <form onSubmit={handleClose} className="space-y-6">
           <div className="grid sm:grid-cols-3 gap-4">
-            <div className="bg-white rounded-xl border border-slate-200 p-4 min-w-0">
+            <div className="bg-white rounded-xl border border-slate-200 border-t-4 border-t-slate-300 p-4 min-w-0">
               <div className="flex items-center gap-2 text-slate-500 text-sm mb-1">
                 <Activity className="w-4 h-4 shrink-0" />
                 Transactions Today
               </div>
               <p className="text-xl font-bold text-slate-900">{txSummary.count}</p>
             </div>
-            <div className="bg-white rounded-xl border border-slate-200 p-4 min-w-0">
+            <div className="bg-white rounded-xl border border-slate-200 border-t-4 border-t-[#1ebcb2] p-4 min-w-0">
               <div className="flex items-center gap-2 text-[#1ebcb2] text-sm mb-1">
                 <TrendingUp className="w-4 h-4 shrink-0" />
                 Total Credits
@@ -459,7 +694,7 @@ export function DailyClosingPage() {
                 {formatMoney(txSummary.totalCredits, baseCurrency)}
               </p>
             </div>
-            <div className="bg-white rounded-xl border border-slate-200 p-4 min-w-0">
+            <div className="bg-white rounded-xl border border-slate-200 border-t-4 border-t-[#ee7b22] p-4 min-w-0">
               <div className="flex items-center gap-2 text-[#ee7b22] text-sm mb-1">
                 <TrendingDown className="w-4 h-4 shrink-0" />
                 Total Debits
@@ -474,15 +709,7 @@ export function DailyClosingPage() {
             <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
               <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between gap-3 flex-wrap">
                 <h3 className="font-semibold text-slate-900">Today&rsquo;s Rates (from Forex Trading)</h3>
-                <button
-                  type="button"
-                  onClick={reloadFx}
-                  disabled={fxLoading}
-                  className="inline-flex items-center gap-2 px-3 py-1.5 text-sm font-medium rounded-lg border border-slate-200 text-slate-600 hover:border-[#641f60] hover:text-[#641f60] disabled:opacity-50 transition-all shrink-0"
-                >
-                  {fxLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
-                  Refresh
-                </button>
+                <LiveRatesBadge lastUpdated={lastRatesUpdate} loading={fxLoading} onRefresh={reloadFx} />
               </div>
               {fxError && (
                 <div className="mx-6 mt-4 p-3 bg-[#c46040]/10 border border-[#c46040]/30 rounded-lg text-[#c46040] text-sm break-words">
@@ -494,10 +721,12 @@ export function DailyClosingPage() {
                   const source = rateSource(code);
                   const fx = lookupRate(fxRates, code, baseCurrency, 'buy');
                   return (
-                    <div key={code} className="border border-slate-200 rounded-lg p-3 min-w-0">
+                    <div key={code} className="border border-slate-200 rounded-lg p-3 min-w-0 transition-all hover:shadow-sm">
                       <div className="flex items-center justify-between gap-2 mb-1.5">
-                        <span className="text-sm font-medium text-slate-700 whitespace-nowrap">
-                          1 {code} = {baseCurrency}
+                        <span className="text-sm font-medium text-slate-700 whitespace-nowrap flex items-center gap-1.5">
+                          <CurrencyBadge code={code} size={16} />1 {code} =
+                          <CurrencyBadge code={baseCurrency} size={16} />
+                          {baseCurrency}
                         </span>
                         {source === 'forex' && (
                           <span className="text-[10px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded bg-[#1ebcb2]/10 text-[#1ebcb2] shrink-0">
@@ -552,38 +781,42 @@ export function DailyClosingPage() {
 
             <div className="p-6 space-y-3">
               <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
-                {rows.map((row) => (
-                  <div
-                    key={row.key}
-                    className="border border-slate-200 rounded-xl bg-white shadow-sm p-4 focus-within:border-[#1ebcb2] focus-within:ring-1 focus-within:ring-[#1ebcb2] hover:shadow-md transition-all min-w-0"
-                  >
-                    <div className="w-9 h-9 rounded-full bg-slate-50 flex items-center justify-center mx-auto mb-2">
-                      <ChannelIcon channelKey={row.key} className="w-4 h-4 text-slate-400" />
-                    </div>
-                    <label
-                      htmlFor={`close-${row.key}`}
-                      className="block text-center text-xs font-medium text-slate-600 mb-2 truncate"
-                      title={row.label}
+                {rows.map((row) => {
+                  const rowCurrency = currencyForKey(row.key, accountCurrencies, baseCurrency);
+                  const accent = channelAccent(row.key);
+                  return (
+                    <div
+                      key={row.key}
+                      className={`border border-slate-200 border-t-4 ${accent.border} rounded-xl bg-white shadow-sm p-4 focus-within:ring-1 focus-within:ring-[#1ebcb2] hover:shadow-md transition-all min-w-0`}
                     >
-                      {row.label}
-                    </label>
-                    <div className="relative">
-                      <span className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-xs font-medium text-slate-400">
-                        {currencyPrefix(row.key)}
-                      </span>
-                      <input
-                        id={`close-${row.key}`}
-                        type="number"
-                        step="0.01"
-                        min="0"
-                        value={row.amount}
-                        onChange={(e) => updateRow(row.key, e.target.value)}
-                        className="w-full min-w-0 box-border pl-10 pr-2 py-2 border border-slate-300 rounded-md text-right text-sm font-medium focus:outline-none focus:ring-2 focus:ring-[#1ebcb2] focus:border-transparent"
-                        placeholder="0.00"
-                      />
+                      <div className={`w-9 h-9 rounded-full ${accent.iconBg} flex items-center justify-center mx-auto mb-2`}>
+                        <ChannelIcon channelKey={row.key} className={`w-4 h-4 ${accent.iconColor}`} />
+                      </div>
+                      <label
+                        htmlFor={`close-${row.key}`}
+                        className="block text-center text-xs font-medium text-slate-600 mb-2 truncate"
+                        title={row.label}
+                      >
+                        {row.label}
+                      </label>
+                      <div className="relative">
+                        <span className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-xs font-medium text-slate-400">
+                          {rowCurrency}
+                        </span>
+                        <input
+                          id={`close-${row.key}`}
+                          type="number"
+                          step="0.01"
+                          min="0"
+                          value={row.amount}
+                          onChange={(e) => updateRow(row.key, e.target.value)}
+                          className="w-full min-w-0 box-border pl-10 pr-2 py-2 border border-slate-300 rounded-md text-right text-sm font-medium focus:outline-none focus:ring-2 focus:ring-[#1ebcb2] focus:border-transparent"
+                          placeholder="0.00"
+                        />
+                      </div>
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
 
               <div className="pt-4 mt-4 border-t border-dashed border-slate-300 space-y-1.5 text-sm">
@@ -626,7 +859,7 @@ export function DailyClosingPage() {
                     <p className="text-xs text-slate-500 mt-0.5">
                       {isBalanced
                         ? 'Entered totals match expected totals exactly.'
-                        : "This will be recorded as a variance note on today\u2019s record when you close."}
+                        : "This will be recorded as a variance note on today’s record when you close."}
                     </p>
                   </div>
                 </div>

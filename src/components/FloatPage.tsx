@@ -17,7 +17,13 @@ import {
   ChevronDown,
   Building2,
   Landmark,
+  Banknote,
+  Smartphone,
+  Lock,
+  Shield,
+  Coins,
 } from 'lucide-react';
+import type { LucideIcon } from 'lucide-react';
 
 // ============================================================================
 // Currency flags (shared visual language with TransactionsPage)
@@ -230,20 +236,26 @@ function CurrencySelect({ value, onChange }: { value: string; onChange: (v: stri
 // Float-account constants & helpers
 // ============================================================================
 
-const FLOAT_TYPES: { value: string; label: string; icon: string }[] = [
-  { value: 'cash', label: 'Cash', icon: '💵' },
-  { value: 'mpesa', label: 'M-Pesa Till', icon: '📱' },
-  { value: 'mtn_momo', label: 'MoMo', icon: '📱' },
-  { value: 'bank', label: 'Bank', icon: '🏦' },
-  { value: 'safe', label: 'Safe', icon: '🔒' },
-  { value: 'vault', label: 'Vault', icon: '🏛️' },
-  { value: 'other', label: 'Other', icon: '💰' },
+const FLOAT_TYPES: { value: string; label: string; Icon: LucideIcon }[] = [
+  { value: 'cash', label: 'Cash', Icon: Banknote },
+  { value: 'mpesa', label: 'M-Pesa Till', Icon: Smartphone },
+  { value: 'mtn_momo', label: 'MoMo', Icon: Smartphone },
+  { value: 'bank', label: 'Bank', Icon: Landmark },
+  { value: 'safe', label: 'Safe', Icon: Lock },
+  { value: 'vault', label: 'Vault', Icon: Shield },
+  { value: 'other', label: 'Other', Icon: Coins },
 ];
 
 const STATUS_OPTIONS: FloatAccount['status'][] = ['active', 'inactive', 'frozen'];
 
-function getFloatIcon(type: string) {
-  return FLOAT_TYPES.find((t) => t.value === type)?.icon || '💰';
+function getFloatIcon(type: string): LucideIcon {
+  return FLOAT_TYPES.find((t) => t.value === type)?.Icon || Coins;
+}
+
+// Renders the lucide icon for a given float type.
+function FloatTypeIcon({ type, className }: { type: string; className?: string }) {
+  const Icon = getFloatIcon(type);
+  return <Icon className={className} />;
 }
 
 function floatTypeLabel(type: string) {
@@ -360,6 +372,7 @@ export function FloatPage() {
 
   useEffect(() => {
     if (tenant) loadData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tenant]);
 
   // Resilient fetch: scoped to the tenant only. Branch-level filtering happens
@@ -394,7 +407,7 @@ export function FloatPage() {
     return accounts.filter((a) => a.branch_id === branch.id || a.branch_id === null);
   }, [accounts, scope, branch]);
 
-  // Per-currency totals instead of one blended `$` figure.
+  // Per-currency totals instead of one blended figure.
   const currencyTotals = useMemo(() => {
     const map = new Map<string, { balance: number; count: number; lowCount: number }>();
     for (const a of filteredAccounts) {
@@ -632,8 +645,8 @@ export function FloatPage() {
                   onClick={() => setSelectedAccount(account)}
                   className="w-full text-left px-4 sm:px-6 py-4 sm:py-6 hover:bg-slate-50 transition-colors flex items-center gap-3 sm:gap-4"
                 >
-                  <div className="w-12 h-12 sm:w-14 sm:h-14 rounded-xl bg-gradient-to-br from-[#ee7b22] to-[#c46040] flex items-center justify-center text-white text-xl sm:text-2xl flex-shrink-0">
-                    {getFloatIcon(account.float_type)}
+                  <div className="w-12 h-12 sm:w-14 sm:h-14 rounded-xl bg-[#ee7b22] text-white flex items-center justify-center flex-shrink-0">
+                    <FloatTypeIcon type={account.float_type} className="w-6 h-6 sm:w-7 sm:h-7" />
                   </div>
                   <div className="flex-1 min-w-0">
                     <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1 sm:gap-4">
@@ -731,7 +744,7 @@ export function FloatPage() {
                           : 'border-slate-200 text-slate-600 hover:border-slate-300'
                       }`}
                     >
-                      <span>{t.icon}</span>
+                      <t.Icon className="w-4 h-4 flex-shrink-0" />
                       {t.label}
                     </button>
                   ))}
@@ -887,7 +900,9 @@ export function FloatPage() {
             {/* Fixed header */}
             <div className="px-4 sm:px-6 py-4 border-b border-[#dae1e1] flex items-center justify-between flex-shrink-0">
               <h2 className="text-lg font-bold text-[#641f60] flex items-center gap-2">
-                <span className="text-2xl">{getFloatIcon(selectedAccount.float_type)}</span>
+                <span className="w-9 h-9 rounded-lg bg-[#ee7b22] text-white flex items-center justify-center flex-shrink-0">
+                  <FloatTypeIcon type={selectedAccount.float_type} className="w-5 h-5" />
+                </span>
                 {floatTypeLabel(selectedAccount.float_type)}
               </h2>
               <button

@@ -30,6 +30,7 @@ import { FloatPage } from './components/FloatPage';
 import { DailyOpeningPage } from './components/DailyOpeningPage';
 import { DailyClosingPage } from './components/DailyClosingPage';
 import { BranchTransfersPage } from './components/BranchTransfersPage';
+import { BranchPerformancePage } from './components/BranchPerformancePage.tsx';
 import { ChartOfAccountsPage } from './components/ChartOfAccountsPage';
 import { JournalEntriesPage } from './components/JournalEntriesPage';
 import { GeneralLedgerPage } from './components/GeneralLedgerPage';
@@ -70,11 +71,11 @@ function AppContent() {
   // Inspect context attributes to evaluate whether user belongs to core operation tier
   const isPlatformSuperAdmin = React.useMemo(() => {
     if (!user || !user.email) return false;
-    
+
     // Evaluate via identity token metadata flags or designated administrative routing domains
     return (
       user.user_metadata?.is_platform_admin === true ||
-      user.email.endsWith('@trustseed.net') || 
+      user.email.endsWith('@trustseed.net') ||
       user.email.endsWith('@trustseed.network')
     );
   }, [user]);
@@ -98,14 +99,14 @@ function AppContent() {
     const isUnconfirmedEmail = /email not confirmed/i.test(error);
     const title = isUnconfirmedEmail ? 'Confirm your email' : 'Something went wrong';
     const description = isUnconfirmedEmail
-      ? 'Your email address hasn\u2019t been confirmed yet. Check your inbox for a confirmation link, then try signing in again.'
+      ? 'Your email address hasn’t been confirmed yet. Check your inbox for a confirmation link, then try signing in again.'
       : error;
 
     return (
       <div className="min-h-screen bg-[#dae1e1] flex items-center justify-center p-4">
         <div className="w-full max-w-md">
           <div className="bg-white rounded-2xl shadow-2xl border border-[#dae1e1] overflow-hidden">
-            <div className="bg-gradient-to-r from-[#641f60] via-[#641f60] to-[#4a1646] h-2" />
+            <div className="bg-[#641f60] h-2" />
             <div className="p-8 text-center">
               <div className="flex items-center justify-center gap-3 mb-6">
                 <img src="/logo.png" alt="Trust Seed" className="w-10 h-10 rounded-lg object-contain" />
@@ -260,6 +261,8 @@ function AppContent() {
         return <DailyClosingPage />;
       case 'branch-transfers':
         return <BranchTransfersPage />;
+      case 'branch-performance':
+        return <BranchPerformancePage />;
       case 'chart-of-accounts':
         return <ChartOfAccountsPage />;
       case 'journals':

@@ -1,8 +1,9 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { supabase } from '../lib/supabase';
 import type { SavingsProduct, SavingsAccount, Customer } from '../types';
 import type { InsertTables } from '../lib/supabase';
+import { formatMoney, currencyFlag } from '../lib/accountCurrencies';
 import {
   Plus,
   PiggyBank,
@@ -34,6 +35,10 @@ const EMPTY_ACCOUNT_FORM: AccountForm = {
 
 type TxType = 'deposit' | 'withdrawal';
 
+// Savings records may carry their own currency; fall back to the institution
+// base currency so nothing is silently assumed to be USD.
+type WithCurrency = { currency?: string | null };
+
 export function SavingsPage({ tab = 'products' }: SavingsPageProps) {
   const { tenant, branch } = useAuth();
   const [activeTab, setActiveTab] = useState(tab);
@@ -54,6 +59,16 @@ export function SavingsPage({ tab = 'products' }: SavingsPageProps) {
   const [txNotes, setTxNotes] = useState('');
   const [txError, setTxError] = useState<string | null>(null);
   const [txSubmitting, setTxSubmitting] = useState(false);
+
+  const baseCurrency =
+    (tenant?.settings as { base_currency?: string; default_currency?: string } | undefined)?.base_currency ??
+    tenant?.settings?.default_currency ??
+    'KES';
+
+  const currencyOf = useCallback(
+    (record: WithCurrency | null | undefined): string => record?.currency || baseCurrency,
+    [baseCurrency]
+  );
 
   const loadData = useCallback(async () => {
     if (!tenant) return;
@@ -97,7 +112,19 @@ export function SavingsPage({ tab = 'products' }: SavingsPageProps) {
     loadData();
   }, [loadData, branch]);
 
-  const totalBalance = accounts.reduce((sum, a) => sum + (a.balance || 0), 0);
+  // Totals are grouped by currency so mixed-currency portfolios aren't summed
+  // into a meaningless single figure.
+  const totalsByCurrency = useMemo(() => {
+    const map = new Map<string, number>();
+    accounts.forEach((a) => {
+      const code = currencyOf(a as WithCurrency);
+      map.set(code, (map.get(code) ?? 0) + (a.balance || 0));
+    });
+    return Array.from(map.entries())
+      .map(([code, total]) => ({ code, total }))
+      .sort((a, b) => b.total - a.total);
+  }, [accounts, currencyOf]);
+
   const activeProducts = products.filter((p) => p.status === 'active');
 
   const openTransactionModal = (account: SavingsAccount & { customer?: Customer }, type: TxType) => {
@@ -128,7 +155,7 @@ export function SavingsPage({ tab = 'products' }: SavingsPageProps) {
 
     setTxSubmitting(true);
     try {
-      const { error } = await supabase.rpc('process_savings_transaction', {
+      const { error } = await (supabase.rpc as any)('process_savings_transaction', {
         p_account_id: txAccount.id,
         p_type: txType,
         p_amount: amount,
@@ -180,7 +207,10 @@ export function SavingsPage({ tab = 'products' }: SavingsPageProps) {
 
     if (product && initialBalance < product.min_opening_balance) {
       setFormError(
-        `Initial balance must be at least ${product.min_opening_balance.toLocaleString()} for this product.`
+        `Initial balance must be at least ${formatMoney(
+          product.min_opening_balance,
+          currencyOf(product as WithCurrency)
+        )} for this product.`
       );
       return;
     }
@@ -209,6 +239,9 @@ export function SavingsPage({ tab = 'products' }: SavingsPageProps) {
       setSubmitting(false);
     }
   };
+
+  const selectedProduct = products.find((p) => p.id === formData.product_id);
+  const formCurrency = currencyOf(selectedProduct as WithCurrency);
 
   return (
     <div className="space-y-6">
@@ -278,9 +311,25 @@ export function SavingsPage({ tab = 'products' }: SavingsPageProps) {
             <div className="p-2.5 rounded-lg bg-[#ee7b22]/10">
               <DollarSign className="w-6 h-6 text-[#ee7b22]" />
             </div>
-            <div>
+            <div className="min-w-0">
               <p className="text-sm text-slate-500">Total Savings</p>
-              <p className="text-2xl font-bold text-slate-900">${totalBalance.toLocaleString()}</p>
+              {totalsByCurrency.length === 0 ? (
+                <p className="text-2xl font-bold text-slate-900">
+                  {currencyFlag(baseCurrency)} {formatMoney(0, baseCurrency)}
+                </p>
+              ) : totalsByCurrency.length === 1 ? (
+                <p className="text-2xl font-bold text-slate-900 break-words">
+                  {currencyFlag(totalsByCurrency[0].code)} {formatMoney(totalsByCurrency[0].total, totalsByCurrency[0].code)}
+                </p>
+              ) : (
+                <div className="space-y-0.5">
+                  {totalsByCurrency.map(({ code, total }) => (
+                    <p key={code} className="text-base font-bold text-slate-900 break-words">
+                      {currencyFlag(code)} {formatMoney(total, code)}
+                    </p>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -325,20 +374,29 @@ export function SavingsPage({ tab = 'products' }: SavingsPageProps) {
             {activeTab === 'products' && (
               <div className="divide-y divide-[#dae1e1]">
                 {products.length > 0 ? (
-                  products.map((product) => (
-                    <div key={product.id} className="p-6 hover:bg-slate-50 transition-colors">
-                      <div className="flex items-center justify-between">
-                        <div>
-                          <h3 className="font-semibold text-slate-900">{product.name}</h3>
-                          <p className="text-sm text-slate-500">{product.code}</p>
-                        </div>
-                        <div className="text-right">
-                          <p className="text-lg font-bold text-[#1ebcb2]">{product.interest_rate}% p.a.</p>
-                          <p className="text-sm text-slate-500">Min: ${product.min_balance}</p>
+                  products.map((product) => {
+                    const code = currencyOf(product as WithCurrency);
+                    return (
+                      <div key={product.id} className="p-6 hover:bg-slate-50 transition-colors">
+                        <div className="flex items-center justify-between gap-4">
+                          <div className="min-w-0">
+                            <h3 className="font-semibold text-slate-900 flex items-center gap-2">
+                              {product.name}
+                              <span className="text-xs font-medium text-slate-400 inline-flex items-center gap-1">
+                                <span aria-hidden>{currencyFlag(code)}</span>
+                                {code}
+                              </span>
+                            </h3>
+                            <p className="text-sm text-slate-500">{product.code}</p>
+                          </div>
+                          <div className="text-right shrink-0">
+                            <p className="text-lg font-bold text-[#1ebcb2]">{product.interest_rate}% p.a.</p>
+                            <p className="text-sm text-slate-500">Min: {formatMoney(product.min_balance, code)}</p>
+                          </div>
                         </div>
                       </div>
-                    </div>
-                  ))
+                    );
+                  })
                 ) : (
                   <div className="py-12 text-center">
                     <PiggyBank className="w-12 h-12 text-slate-300 mx-auto mb-3" />
@@ -354,55 +412,58 @@ export function SavingsPage({ tab = 'products' }: SavingsPageProps) {
             {activeTab === 'accounts' && (
               <div className="divide-y divide-[#dae1e1]">
                 {accounts.length > 0 ? (
-                  accounts.map((account) => (
-                    <div key={account.id} className="p-6 hover:bg-slate-50 transition-colors">
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-4">
-                          <div className="w-12 h-12 rounded-full bg-[#1ebcb2]/10 flex items-center justify-center">
-                            <DollarSign className="w-6 h-6 text-[#1ebcb2]" />
+                  accounts.map((account) => {
+                    const code = currencyOf(account as WithCurrency);
+                    return (
+                      <div key={account.id} className="p-6 hover:bg-slate-50 transition-colors">
+                        <div className="flex items-center justify-between gap-4">
+                          <div className="flex items-center gap-4 min-w-0">
+                            <div className="w-12 h-12 rounded-full bg-[#1ebcb2]/10 flex items-center justify-center shrink-0">
+                              <DollarSign className="w-6 h-6 text-[#1ebcb2]" />
+                            </div>
+                            <div className="min-w-0">
+                              <h3 className="font-semibold text-slate-900 truncate">
+                                {account.customer?.first_name} {account.customer?.last_name}
+                              </h3>
+                              <p className="text-sm text-slate-500">{account.account_number}</p>
+                            </div>
                           </div>
-                          <div>
-                            <h3 className="font-semibold text-slate-900">
-                              {account.customer?.first_name} {account.customer?.last_name}
-                            </h3>
-                            <p className="text-sm text-slate-500">{account.account_number}</p>
+                          <div className="flex items-center gap-4 shrink-0">
+                            <span
+                              className={`px-2.5 py-1 rounded-full text-xs font-medium ${
+                                account.status === 'active'
+                                  ? 'bg-green-100 text-green-700'
+                                  : 'bg-slate-100 text-slate-600'
+                              }`}
+                            >
+                              {account.status}
+                            </span>
+                            <div className="text-right">
+                              <p className="text-lg font-bold text-slate-900 whitespace-nowrap">
+                                {currencyFlag(code)} {formatMoney(account.balance || 0, code)}
+                              </p>
+                            </div>
+                            <button
+                              onClick={() => openTransactionModal(account, 'deposit')}
+                              className="p-2 rounded-lg text-slate-400 hover:text-[#1ebcb2] hover:bg-slate-100 transition-colors"
+                              aria-label="Deposit"
+                              title="Deposit"
+                            >
+                              <ArrowDownCircle className="w-5 h-5" />
+                            </button>
+                            <button
+                              onClick={() => openTransactionModal(account, 'withdrawal')}
+                              className="p-2 rounded-lg text-slate-400 hover:text-[#ee7b22] hover:bg-slate-100 transition-colors"
+                              aria-label="Withdraw"
+                              title="Withdraw"
+                            >
+                              <ArrowUpCircle className="w-5 h-5" />
+                            </button>
                           </div>
-                        </div>
-                        <div className="flex items-center gap-4">
-                          <span
-                            className={`px-2.5 py-1 rounded-full text-xs font-medium ${
-                              account.status === 'active'
-                                ? 'bg-green-100 text-green-700'
-                                : 'bg-slate-100 text-slate-600'
-                            }`}
-                          >
-                            {account.status}
-                          </span>
-                          <div className="text-right">
-                            <p className="text-lg font-bold text-slate-900">
-                              ${account.balance?.toLocaleString()}
-                            </p>
-                          </div>
-                          <button
-                            onClick={() => openTransactionModal(account, 'deposit')}
-                            className="p-2 rounded-lg text-slate-400 hover:text-[#1ebcb2] hover:bg-slate-100 transition-colors"
-                            aria-label="Deposit"
-                            title="Deposit"
-                          >
-                            <ArrowDownCircle className="w-5 h-5" />
-                          </button>
-                          <button
-                            onClick={() => openTransactionModal(account, 'withdrawal')}
-                            className="p-2 rounded-lg text-slate-400 hover:text-[#ee7b22] hover:bg-slate-100 transition-colors"
-                            aria-label="Withdraw"
-                            title="Withdraw"
-                          >
-                            <ArrowUpCircle className="w-5 h-5" />
-                          </button>
                         </div>
                       </div>
-                    </div>
-                  ))
+                    );
+                  })
                 ) : (
                   <div className="py-12 text-center">
                     <DollarSign className="w-12 h-12 text-slate-300 mx-auto mb-3" />
@@ -467,7 +528,7 @@ export function SavingsPage({ tab = 'products' }: SavingsPageProps) {
                   <option value="">Select product</option>
                   {activeProducts.map((p) => (
                     <option key={p.id} value={p.id}>
-                      {p.name} ({p.interest_rate}% p.a.)
+                      {currencyFlag(currencyOf(p as WithCurrency))} {p.name} ({p.interest_rate}% p.a.)
                     </option>
                   ))}
                 </select>
@@ -479,7 +540,12 @@ export function SavingsPage({ tab = 'products' }: SavingsPageProps) {
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1">Initial Balance</label>
+                <label className="block text-sm font-medium text-slate-700 mb-1">
+                  Initial Balance{' '}
+                  <span className="text-slate-400 font-normal">
+                    ({currencyFlag(formCurrency)} {formCurrency})
+                  </span>
+                </label>
                 <input
                   type="number"
                   step="0.01"
@@ -549,7 +615,8 @@ export function SavingsPage({ tab = 'products' }: SavingsPageProps) {
               <div className="bg-slate-50 rounded-lg p-3 text-sm text-slate-600 flex items-center justify-between">
                 <span>Current balance</span>
                 <span className="font-semibold text-slate-900">
-                  ${txAccount.balance?.toLocaleString()}
+                  {currencyFlag(currencyOf(txAccount as WithCurrency))}{' '}
+                  {formatMoney(txAccount.balance || 0, currencyOf(txAccount as WithCurrency))}
                 </span>
               </div>
 
@@ -581,7 +648,13 @@ export function SavingsPage({ tab = 'products' }: SavingsPageProps) {
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1">Amount *</label>
+                <label className="block text-sm font-medium text-slate-700 mb-1">
+                  Amount{' '}
+                  <span className="text-slate-400 font-normal">
+                    ({currencyFlag(currencyOf(txAccount as WithCurrency))} {currencyOf(txAccount as WithCurrency)})
+                  </span>{' '}
+                  *
+                </label>
                 <input
                   type="number"
                   step="0.01"

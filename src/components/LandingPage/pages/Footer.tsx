@@ -142,7 +142,7 @@ export function Footer() {
               rel="noopener noreferrer"
               className="text-sm text-[#1ebcb2] hover:text-white transition-colors whitespace-nowrap"
             >
-              
+              Developed by Sharmai Technologies
             </a>
           
           </div>

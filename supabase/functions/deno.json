@@ -1,0 +1,15 @@
+{
+  "//": "Place this at supabase/functions/deno.json. The Deno extension and the Supabase CLI both read it.",
+  "imports": {
+    "@supabase/supabase-js": "npm:@supabase/supabase-js@2.45.0"
+  },
+  "lint": {
+    "rules": {
+      "tags": ["recommended"]
+    }
+  },
+  "compilerOptions": {
+    "lib": ["deno.window", "dom", "dom.iterable", "esnext"],
+    "strict": true
+  }
+}

@@ -5,6 +5,16 @@ import type { Tables, InsertTables, Json } from '../lib/supabase';
 import type { TenantSettings } from '../types';
 import { useTenantExchangeRates, lookupRate } from '../lib/forexRates';
 import {
+  CURRENCY_OPTIONS,
+  REFERENCE_ACCOUNTS,
+  REFERENCE_ACCOUNT_LABELS,
+  type AccountCurrencyMap,
+  currencyForKey,
+  formatMoney,
+  resolveAccountCurrencies,
+  accountCurrenciesDiffer,
+} from '../lib/accountCurrencies';
+import {
   Sunrise,
   Loader2,
   RefreshCw,
@@ -20,7 +30,232 @@ import {
   Check,
   Save,
   Globe,
+  ArrowRight,
+  ChevronDown,
 } from 'lucide-react';
+
+// ============================================================================
+// Real flag badges — inline SVG instead of emoji flags. Emoji flags (used by
+// CURRENCY_OPTIONS / currencyFlag() previously) render as plain two-letter
+// codes on Windows and some Android browsers because those platforms don't
+// ship the regional-indicator glyphs. Inline SVG is crisp everywhere and
+// needs no font support. Shared visual language with Transactions/Transfers/
+// Wallets pages.
+// ============================================================================
+
+function FlagGraphic({ code }: { code: string }) {
+  switch (code) {
+    case 'USD': // United States
+      return (
+        <>
+          <rect width="40" height="40" fill="#b22234" />
+          <rect y="3.08" width="40" height="3.08" fill="#fff" />
+          <rect y="9.23" width="40" height="3.08" fill="#fff" />
+          <rect y="15.38" width="40" height="3.08" fill="#fff" />
+          <rect y="21.54" width="40" height="3.08" fill="#fff" />
+          <rect y="27.69" width="40" height="3.08" fill="#fff" />
+          <rect y="33.85" width="40" height="3.08" fill="#fff" />
+          <rect width="18" height="21.54" fill="#3c3b6e" />
+          <g fill="#fff">
+            {[4, 10, 16].map((y) =>
+              [3, 7, 11, 15].map((x) => <circle key={`${x}-${y}`} cx={x} cy={y} r="1" />)
+            )}
+          </g>
+        </>
+      );
+    case 'KES': // Kenya
+      return (
+        <>
+          <rect width="40" height="10" fill="#000" />
+          <rect y="10" width="40" height="4" fill="#fff" />
+          <rect y="14" width="40" height="12" fill="#bb0000" />
+          <rect y="26" width="40" height="4" fill="#fff" />
+          <rect y="30" width="40" height="10" fill="#006600" />
+          <ellipse cx="20" cy="20" rx="4.5" ry="8" fill="#fff" />
+          <ellipse cx="20" cy="20" rx="3" ry="6.5" fill="#bb0000" />
+          <path d="M20 11 L21.5 20 L20 29 L18.5 20 Z" fill="#000" />
+        </>
+      );
+    case 'SSP': // South Sudan
+      return (
+        <>
+          <rect width="40" height="12" fill="#000" />
+          <rect y="12" width="40" height="2" fill="#fff" />
+          <rect y="14" width="40" height="12" fill="#bb0000" />
+          <rect y="26" width="40" height="2" fill="#fff" />
+          <rect y="28" width="40" height="12" fill="#009543" />
+          <path d="M0 0 L20 20 L0 40 Z" fill="#0f47af" />
+          <path d="M4 20 l5.5 -1.8 -3.4 4.7 0 -5.8 3.4 4.7 z" fill="#fcdd09" />
+        </>
+      );
+    case 'UGX': // Uganda
+      return (
+        <>
+          <rect width="40" height="6.67" fill="#000" />
+          <rect y="6.67" width="40" height="6.67" fill="#fcdc04" />
+          <rect y="13.33" width="40" height="6.67" fill="#d90000" />
+          <rect y="20" width="40" height="6.67" fill="#000" />
+          <rect y="26.67" width="40" height="6.67" fill="#fcdc04" />
+          <rect y="33.33" width="40" height="6.67" fill="#d90000" />
+          <circle cx="20" cy="20" r="6" fill="#fff" />
+          <circle cx="20" cy="20" r="5.4" fill="none" stroke="#000" strokeWidth="0.4" />
+        </>
+      );
+    case 'TZS': // Tanzania
+      return (
+        <>
+          <path d="M0 0 H40 V40 H0 Z" fill="#1eb53a" />
+          <path d="M40 0 V40 H0 Z" fill="#00a3dd" />
+          <path d="M0 40 L40 0 v6 L6 40 Z" fill="#fcd116" />
+          <path d="M0 40 L40 0 h-6 L0 34 Z" fill="#fcd116" />
+          <path d="M0 34 L34 0 h-34 Z M40 6 L6 40 h34 Z" fill="#000" />
+        </>
+      );
+    case 'RWF': // Rwanda
+      return (
+        <>
+          <rect width="40" height="40" fill="#20603d" />
+          <rect width="40" height="26.67" fill="#00a1de" />
+          <rect y="20" width="40" height="6.67" fill="#fad201" />
+          <circle cx="31" cy="9" r="5" fill="#fad201" />
+          {Array.from({ length: 24 }).map((_, i) => {
+            const angle = (i * 15 * Math.PI) / 180;
+            const x1 = 31 + 4 * Math.sin(angle);
+            const y1 = 9 - 4 * Math.cos(angle);
+            const x2 = 31 + 5 * Math.sin(angle);
+            const y2 = 9 - 5 * Math.cos(angle);
+            return <line key={i} x1={x1} y1={y1} x2={x2} y2={y2} stroke="#e5be01" strokeWidth="0.6" />;
+          })}
+        </>
+      );
+    case 'EUR': // European Union
+      return (
+        <>
+          <rect width="40" height="40" fill="#003399" />
+          <g fill="#ffcc00">
+            {Array.from({ length: 12 }).map((_, i) => {
+              const angle = (i * 30 * Math.PI) / 180;
+              const cx = 20 + 11 * Math.sin(angle);
+              const cy = 20 - 11 * Math.cos(angle);
+              return <circle key={i} cx={cx} cy={cy} r="1.6" />;
+            })}
+          </g>
+        </>
+      );
+    case 'GBP': // United Kingdom
+      return (
+        <>
+          <rect width="40" height="40" fill="#012169" />
+          <path d="M0 0 L40 40 M40 0 L0 40" stroke="#fff" strokeWidth="6" />
+          <path d="M0 0 L40 40 M40 0 L0 40" stroke="#c8102e" strokeWidth="3" />
+          <path d="M20 0 V40 M0 20 H40" stroke="#fff" strokeWidth="10" />
+          <path d="M20 0 V40 M0 20 H40" stroke="#c8102e" strokeWidth="6" />
+        </>
+      );
+    default:
+      return (
+        <>
+          <rect width="40" height="40" fill="#64748b" />
+          <text
+            x="20"
+            y="21"
+            textAnchor="middle"
+            dominantBaseline="central"
+            fontSize="14"
+            fontWeight="700"
+            fill="#fff"
+            fontFamily="system-ui, sans-serif"
+          >
+            {code.slice(0, 2)}
+          </text>
+        </>
+      );
+  }
+}
+
+function CurrencyBadge({ code, size = 20 }: { code: string; size?: number }) {
+  const clipId = `daily-open-flag-${code}`;
+  return (
+    <svg width={size} height={size} viewBox="0 0 40 40" role="img" aria-label={`${code} flag`} className="flex-shrink-0">
+      <defs>
+        <clipPath id={clipId}>
+          <circle cx="20" cy="20" r="20" />
+        </clipPath>
+      </defs>
+      <g clipPath={`url(#${clipId})`}>
+        <FlagGraphic code={code} />
+      </g>
+      <circle cx="20" cy="20" r="19" fill="none" stroke="#00000022" strokeWidth="2" />
+    </svg>
+  );
+}
+
+// Custom dropdown (not a native <select>) so a real flag SVG can render next
+// to each option — native <option> elements only support plain text, which
+// is why emoji were being used there in the first place.
+function FlagCurrencySelect({
+  value,
+  onChange,
+  options,
+  baseCurrency,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  options: string[];
+  baseCurrency?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        type="button"
+        onClick={() => setOpen((p) => !p)}
+        className="w-full flex items-center gap-2 px-2 py-2 border border-slate-300 rounded-md bg-white text-left hover:border-slate-400 focus:outline-none focus:ring-2 focus:ring-[#1ebcb2]"
+      >
+        <CurrencyBadge code={value} size={18} />
+        <span className="flex-1 min-w-0 truncate text-sm font-medium text-slate-800">
+          {value}
+          {baseCurrency && value === baseCurrency ? ' (base)' : ''}
+        </span>
+        <ChevronDown className="w-4 h-4 text-slate-400 flex-shrink-0" />
+      </button>
+
+      {open && (
+        <div className="absolute z-30 mt-1 w-full bg-white border border-slate-200 rounded-lg shadow-lg max-h-56 overflow-y-auto">
+          {options.map((code) => (
+            <button
+              key={code}
+              type="button"
+              onClick={() => {
+                onChange(code);
+                setOpen(false);
+              }}
+              className={`w-full flex items-center gap-2 px-3 py-2 text-left text-sm hover:bg-slate-50 ${
+                code === value ? 'bg-[#1ebcb2]/10' : ''
+              }`}
+            >
+              <CurrencyBadge code={code} size={18} />
+              <span className={code === value ? 'text-[#641f60] font-medium' : 'text-slate-700'}>
+                {code}
+                {baseCurrency && code === baseCurrency ? ' (base)' : ''}
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 type DailyOperation = Tables<'daily_operations'>;
 
@@ -30,46 +265,12 @@ interface BalanceRow {
   amount: string;
 }
 
-interface CurrencyOption {
-  code: string;
-  name: string;
-  symbol: string;
-}
-
-const CURRENCY_OPTIONS: CurrencyOption[] = [
-  { code: 'KES', name: 'Kenyan Shilling', symbol: 'KSh' },
-  { code: 'UGX', name: 'Ugandan Shilling', symbol: 'USh' },
-  { code: 'SSP', name: 'South Sudanese Pound', symbol: 'SSP' },
-  { code: 'TZS', name: 'Tanzanian Shilling', symbol: 'TSh' },
-  { code: 'RWF', name: 'Rwandan Franc', symbol: 'RWF' },
-  { code: 'USD', name: 'US Dollar', symbol: '$' },
-  { code: 'EUR', name: 'Euro', symbol: '\u20ac' },
-  { code: 'GBP', name: 'British Pound', symbol: '\u00a3' },
-];
-
-const CURRENCY_SYMBOL_MAP: Record<string, string> = CURRENCY_OPTIONS.reduce(
-  (acc, c) => ({ ...acc, [c.code]: c.symbol }),
-  {} as Record<string, string>
-);
+// Real-time forex: poll in the background on top of the manual refresh
+// button, so the conversion math staff sees never goes stale mid-session.
+const AUTO_REFRESH_INTERVAL_MS = 45_000;
 
 function todayIso(): string {
   return new Date().toISOString().slice(0, 10);
-}
-
-function formatMoney(value: number, currency = 'KES'): string {
-  const symbol = CURRENCY_SYMBOL_MAP[currency] ?? `${currency} `;
-  return `${symbol}${value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-}
-
-function currencyPrefix(key: string): string {
-  return key.startsWith('cash_') ? key.slice(5) : 'KES';
-}
-
-// Non-cash channels (bank, mobile money) are treated as already denominated
-// in the institution's base currency; only physical cash carries its own
-// currency code and needs conversion.
-function currencyForRow(key: string, baseCurrency: string): string {
-  return key.startsWith('cash_') ? key.slice(5) : baseCurrency;
 }
 
 function ChannelIcon({ channelKey, className }: { channelKey: string; className?: string }) {
@@ -77,6 +278,15 @@ function ChannelIcon({ channelKey, className }: { channelKey: string; className?
   if (channelKey === 'bank') return <Landmark className={className} />;
   if (channelKey === 'mtn_momo' || channelKey === 'mpesa') return <Smartphone className={className} />;
   return <Wallet className={className} />;
+}
+
+// Distinct brand-color accent per channel type instead of every card being
+// flat white — cash = teal, mobile money = orange, bank = purple.
+function channelAccent(key: string): { border: string; iconBg: string; iconColor: string } {
+  if (key.startsWith('cash_')) return { border: 'border-t-[#1ebcb2]', iconBg: 'bg-[#1ebcb2]/10', iconColor: 'text-[#1ebcb2]' };
+  if (key === 'mtn_momo' || key === 'mpesa') return { border: 'border-t-[#ee7b22]', iconBg: 'bg-[#ee7b22]/10', iconColor: 'text-[#ee7b22]' };
+  if (key === 'bank') return { border: 'border-t-[#641f60]', iconBg: 'bg-[#641f60]/10', iconColor: 'text-[#641f60]' };
+  return { border: 'border-t-slate-300', iconBg: 'bg-slate-100', iconColor: 'text-slate-500' };
 }
 
 function buildRows(
@@ -98,11 +308,11 @@ function buildRows(
     amount: valueFor(`cash_${c}`),
   }));
 
-  const fixedRows: BalanceRow[] = [
-    { key: 'bank', label: 'Bank', amount: valueFor('bank') },
-    { key: 'mtn_momo', label: 'MTN Mobile Money', amount: valueFor('mtn_momo') },
-    { key: 'mpesa', label: 'M-Pesa', amount: valueFor('mpesa') },
-  ];
+  const fixedRows: BalanceRow[] = REFERENCE_ACCOUNTS.map((acc) => ({
+    key: acc,
+    label: REFERENCE_ACCOUNT_LABELS[acc],
+    amount: valueFor(acc),
+  }));
 
   return [...currencyRows, ...fixedRows];
 }
@@ -121,6 +331,7 @@ function parseBalances(json: Json): Record<string, number> {
 
 type TenantSettingsShape = Partial<TenantSettings> & {
   base_currency?: string;
+  account_currencies?: AccountCurrencyMap;
   [key: string]: unknown;
 };
 
@@ -144,6 +355,63 @@ function StatusPill({ state }: { state: 'pending' | 'open' | 'closed' | 'blocked
   );
 }
 
+// --- Live rates indicator ----------------------------------------------------
+
+function useTicker(intervalMs = 1000) {
+  const [, forceTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => forceTick((t) => t + 1), intervalMs);
+    return () => clearInterval(id);
+  }, [intervalMs]);
+}
+
+function elapsedLabel(sinceMs: number | null): string {
+  if (sinceMs === null) return 'never';
+  const seconds = Math.max(0, Math.floor((Date.now() - sinceMs) / 1000));
+  if (seconds < 5) return 'just now';
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h ago`;
+}
+
+function LiveRatesBadge({
+  lastUpdated,
+  loading,
+  onRefresh,
+}: {
+  lastUpdated: number | null;
+  loading: boolean;
+  onRefresh: () => void;
+}) {
+  useTicker(1000);
+  return (
+    <div className="flex items-center gap-2 flex-wrap shrink-0">
+      <span className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-full text-xs font-medium bg-[#1ebcb2]/10 text-[#1ebcb2]">
+        <span className="relative flex h-2 w-2">
+          <span
+            className={`absolute inline-flex h-full w-full rounded-full bg-[#1ebcb2] opacity-75 ${
+              loading ? 'animate-ping' : 'animate-pulse'
+            }`}
+          />
+          <span className="relative inline-flex rounded-full h-2 w-2 bg-[#1ebcb2]" />
+        </span>
+        Live &middot; {loading ? 'updating…' : `updated ${elapsedLabel(lastUpdated)}`}
+      </span>
+      <button
+        type="button"
+        onClick={onRefresh}
+        disabled={loading}
+        className="inline-flex items-center gap-2 px-3 py-1.5 text-sm font-medium rounded-lg border border-slate-200 text-slate-600 hover:border-[#641f60] hover:text-[#641f60] disabled:opacity-50 transition-all"
+      >
+        {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+        Refresh
+      </button>
+    </div>
+  );
+}
+
 export function DailyOpeningPage() {
   const { tenant, branch, admin } = useAuth();
 
@@ -159,6 +427,7 @@ export function DailyOpeningPage() {
 
   const [selectedCurrencies, setSelectedCurrencies] = useState<string[]>(['KES']);
   const [baseCurrency, setBaseCurrency] = useState<string>('KES');
+  const [accountCurrencies, setAccountCurrencies] = useState<AccountCurrencyMap>({});
   const [manualRates, setManualRates] = useState<Record<string, string>>({});
   const settingsInitialized = useRef(false);
 
@@ -167,6 +436,23 @@ export function DailyOpeningPage() {
   const [defaultSaveError, setDefaultSaveError] = useState<string | null>(null);
 
   const { rates: fxRates, loading: fxLoading, error: fxError, reload: reloadFx } = useTenantExchangeRates(tenant?.id);
+
+  // --- Real-time forex: poll in the background + track "updated Xs ago" ----
+  const [lastRatesUpdate, setLastRatesUpdate] = useState<number | null>(null);
+  const prevFxLoadingRef = useRef(fxLoading);
+  useEffect(() => {
+    if (prevFxLoadingRef.current && !fxLoading) setLastRatesUpdate(Date.now());
+    prevFxLoadingRef.current = fxLoading;
+  }, [fxLoading]);
+
+  const reloadFxRef = useRef(reloadFx);
+  useEffect(() => {
+    reloadFxRef.current = reloadFx;
+  }, [reloadFx]);
+  useEffect(() => {
+    const id = setInterval(() => reloadFxRef.current(), AUTO_REFRESH_INTERVAL_MS);
+    return () => clearInterval(id);
+  }, []);
 
   const tenantSettings = useMemo<TenantSettingsShape>(
     () => (tenant?.settings ?? {}) as TenantSettingsShape,
@@ -180,14 +466,19 @@ export function DailyOpeningPage() {
     () => tenantSettings.base_currency ?? tenantSettings.default_currency ?? tenantDefaultCurrencies[0] ?? 'KES',
     [tenantSettings, tenantDefaultCurrencies]
   );
+  const tenantDefaultAccountCurrencies = useMemo(
+    () => resolveAccountCurrencies(tenantSettings.account_currencies, tenantDefaultBase),
+    [tenantSettings, tenantDefaultBase]
+  );
 
   useEffect(() => {
     if (!settingsInitialized.current && tenant) {
       setSelectedCurrencies(tenantDefaultCurrencies);
       setBaseCurrency(tenantDefaultBase);
+      setAccountCurrencies(tenantDefaultAccountCurrencies);
       settingsInitialized.current = true;
     }
-  }, [tenant, tenantDefaultCurrencies, tenantDefaultBase]);
+  }, [tenant, tenantDefaultCurrencies, tenantDefaultBase, tenantDefaultAccountCurrencies]);
 
   const loadState = useCallback(async () => {
     if (!tenant || !branch) return;
@@ -248,9 +539,35 @@ export function DailyOpeningPage() {
       } else {
         next = [...prev, code].sort();
       }
-      setBaseCurrency((currentBase) => (next.includes(currentBase) ? currentBase : next[0]));
+      setBaseCurrency((currentBase) => {
+        const nextBase = next.includes(currentBase) ? currentBase : next[0];
+        setAccountCurrencies((prevAcc) => {
+          const updated: AccountCurrencyMap = { ...prevAcc };
+          for (const acc of REFERENCE_ACCOUNTS) {
+            if (!next.includes(updated[acc])) updated[acc] = nextBase;
+          }
+          return updated;
+        });
+        return nextBase;
+      });
       return next;
     });
+  };
+
+  const setBase = (code: string) => {
+    setBaseCurrency(code);
+    setAccountCurrencies((prevAcc) => {
+      const updated: AccountCurrencyMap = { ...prevAcc };
+      for (const acc of REFERENCE_ACCOUNTS) {
+        if (!selectedCurrencies.includes(updated[acc])) updated[acc] = code;
+      }
+      return updated;
+    });
+  };
+
+  const setAccountCurrency = (account: string, code: string) => {
+    setFormError(null);
+    setAccountCurrencies((prev) => ({ ...prev, [account]: code }));
   };
 
   const updateManualRate = (code: string, value: string) => {
@@ -263,11 +580,13 @@ export function DailyOpeningPage() {
     setDefaultSaveError(null);
     setDefaultSaved(false);
     try {
-      const existingSettings = tenant.settings as TenantSettings;
-      const updatedSettings: TenantSettings = {
+      const existingSettings = (tenant.settings ?? {}) as TenantSettings;
+      const updatedSettings = {
         ...existingSettings,
         enabled_currencies: selectedCurrencies,
         default_currency: baseCurrency,
+        base_currency: baseCurrency,
+        account_currencies: accountCurrencies,
       };
       const { error } = await supabase
         .from('tenants')
@@ -289,9 +608,6 @@ export function DailyOpeningPage() {
     setRows((prev) => prev.map((r) => (r.key === key ? { ...r, amount } : r)));
   };
 
-  // Resolves the rate to convert `code` into `baseCurrency`: a configured
-  // Forex Trading rate first, falling back to a manually-entered rate only
-  // when that pair hasn't been set up in Forex Trading yet.
   const resolvedRate = useCallback(
     (code: string): number | null => {
       if (code === baseCurrency) return 1;
@@ -317,14 +633,22 @@ export function DailyOpeningPage() {
     () =>
       rows.reduce((sum, r) => {
         const amt = parseFloat(r.amount) || 0;
-        const code = currencyForRow(r.key, baseCurrency);
+        const code = currencyForKey(r.key, accountCurrencies, baseCurrency);
         const rate = resolvedRate(code);
         return sum + amt * (rate ?? 0);
       }, 0),
-    [rows, baseCurrency, resolvedRate]
+    [rows, accountCurrencies, baseCurrency, resolvedRate]
   );
 
-  const currenciesNeedingRates = selectedCurrencies.filter((c) => c !== baseCurrency);
+  const activeCurrencies = useMemo(() => {
+    const set = new Set<string>(selectedCurrencies);
+    for (const acc of REFERENCE_ACCOUNTS) {
+      if (accountCurrencies[acc]) set.add(accountCurrencies[acc]);
+    }
+    return Array.from(set).sort();
+  }, [selectedCurrencies, accountCurrencies]);
+
+  const currenciesNeedingRates = activeCurrencies.filter((c) => c !== baseCurrency);
   const missingRateCurrencies = currenciesNeedingRates.filter((c) => rateSource(c) === 'missing');
 
   const validate = (): string | null => {
@@ -387,6 +711,30 @@ export function DailyOpeningPage() {
         throw error;
       }
 
+      // Persist the account-currency configuration used today so that Daily
+      // Closing values the same balances with the same currencies. Best-effort:
+      // the day is already open, so a settings hiccup here should not fail it.
+      try {
+        const existingSettings = (tenant.settings ?? {}) as TenantSettings;
+        const needsUpdate =
+          accountCurrenciesDiffer(accountCurrencies, tenantDefaultAccountCurrencies) ||
+          (existingSettings as TenantSettingsShape).base_currency !== baseCurrency;
+        if (needsUpdate) {
+          await supabase
+            .from('tenants')
+            .update({
+              settings: {
+                ...existingSettings,
+                base_currency: baseCurrency,
+                account_currencies: accountCurrencies,
+              },
+            })
+            .eq('id', tenant.id);
+        }
+      } catch (persistErr) {
+        console.warn('Opened the day, but failed to persist currency settings:', persistErr);
+      }
+
       await loadState();
     } catch (err) {
       console.error('Error opening the day:', err);
@@ -407,7 +755,14 @@ export function DailyOpeningPage() {
   const defaultsDiffer =
     baseCurrency !== tenantDefaultBase ||
     selectedCurrencies.length !== tenantDefaultCurrencies.length ||
-    selectedCurrencies.some((c) => !tenantDefaultCurrencies.includes(c));
+    selectedCurrencies.some((c) => !tenantDefaultCurrencies.includes(c)) ||
+    accountCurrenciesDiffer(accountCurrencies, tenantDefaultAccountCurrencies);
+
+  const accountCurrencyChoices = useMemo(() => {
+    const set = new Set<string>(selectedCurrencies);
+    set.add(baseCurrency);
+    return Array.from(set).sort();
+  }, [selectedCurrencies, baseCurrency]);
 
   if (loading) {
     return (
@@ -420,20 +775,27 @@ export function DailyOpeningPage() {
 
   return (
     <div className="space-y-6 max-w-4xl min-w-0">
-      <div className="space-y-1">
-        <div className="flex items-center gap-3 flex-wrap">
-          <h1 className="text-2xl font-bold text-[#641f60]">Daily Opening</h1>
-          {branch && <StatusPill state={pageStatus} />}
+      <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
+        <div className="flex items-start gap-4 min-w-0">
+          <div className="p-3.5 rounded-2xl bg-gradient-to-br from-[#ee7b22] to-[#c46040] text-white shadow-lg shrink-0">
+            <Sunrise className="w-7 h-7" />
+          </div>
+          <div className="min-w-0">
+            <div className="flex items-center gap-3 flex-wrap">
+              <h1 className="text-2xl font-bold text-[#641f60]">Daily Opening</h1>
+              {branch && <StatusPill state={pageStatus} />}
+            </div>
+            <p className="text-slate-600 mt-1">
+              {branch
+                ? `${branch.name} — ${new Date().toLocaleDateString(undefined, {
+                    weekday: 'long',
+                    month: 'long',
+                    day: 'numeric',
+                  })}`
+                : 'Select a branch to continue'}
+            </p>
+          </div>
         </div>
-        <p className="text-slate-600">
-          {branch
-            ? `${branch.name} — ${new Date().toLocaleDateString(undefined, {
-                weekday: 'long',
-                month: 'long',
-                day: 'numeric',
-              })}`
-            : 'Select a branch to continue'}
-        </p>
       </div>
 
       {loadError && (
@@ -494,17 +856,23 @@ export function DailyOpeningPage() {
           <div className="p-6">
             <h4 className="text-sm font-semibold text-slate-700 mb-3">Opening Balances</h4>
             <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
-              {Object.entries(parseBalances(todaysOp.opening_balances)).map(([key, value]) => (
-                <div key={key} className="border border-slate-200 rounded-xl bg-white shadow-sm p-4 text-center min-w-0">
-                  <div className="w-9 h-9 rounded-full bg-slate-50 flex items-center justify-center mx-auto mb-2">
-                    <ChannelIcon channelKey={key} className="w-4 h-4 text-slate-400" />
+              {Object.entries(parseBalances(todaysOp.opening_balances)).map(([key, value]) => {
+                const accent = channelAccent(key);
+                return (
+                  <div
+                    key={key}
+                    className={`border border-slate-200 border-t-4 ${accent.border} rounded-xl bg-white shadow-sm p-4 text-center min-w-0`}
+                  >
+                    <div className={`w-9 h-9 rounded-full ${accent.iconBg} flex items-center justify-center mx-auto mb-2`}>
+                      <ChannelIcon channelKey={key} className={`w-4 h-4 ${accent.iconColor}`} />
+                    </div>
+                    <p className="text-xs text-slate-500 capitalize mb-1 truncate">{key.replace(/_/g, ' ')}</p>
+                    <p className="font-semibold text-slate-900 text-sm break-words">
+                      {formatMoney(value, currencyForKey(key, tenantDefaultAccountCurrencies, tenantDefaultBase))}
+                    </p>
                   </div>
-                  <p className="text-xs text-slate-500 capitalize mb-1 truncate">{key.replace(/_/g, ' ')}</p>
-                  <p className="font-semibold text-slate-900 text-sm break-words">
-                    {formatMoney(value, currencyPrefix(key))}
-                  </p>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </div>
         </div>
@@ -533,7 +901,7 @@ export function DailyOpeningPage() {
                       key={c.code}
                       type="button"
                       onClick={() => toggleCurrency(c.code)}
-                      className={`flex items-center gap-1.5 px-3 py-2 rounded-lg border text-sm font-medium transition-all shrink-0 ${
+                      className={`flex items-center gap-2 px-3 py-2 rounded-lg border text-sm font-medium transition-all shrink-0 ${
                         active
                           ? 'border-[#1ebcb2] bg-[#1ebcb2]/10 text-[#641f60]'
                           : 'border-slate-200 text-slate-600 hover:border-slate-300'
@@ -541,7 +909,7 @@ export function DailyOpeningPage() {
                       aria-pressed={active}
                     >
                       {active && <Check className="w-3.5 h-3.5 text-[#1ebcb2] shrink-0" />}
-                      <span>{c.symbol}</span>
+                      <CurrencyBadge code={c.code} size={18} />
                       <span>{c.code}</span>
                     </button>
                   );
@@ -556,19 +924,53 @@ export function DailyOpeningPage() {
                       <button
                         key={code}
                         type="button"
-                        onClick={() => setBaseCurrency(code)}
-                        className={`px-3 py-1.5 rounded-lg border text-sm font-medium transition-all shrink-0 ${
+                        onClick={() => setBase(code)}
+                        className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border text-sm font-medium transition-all shrink-0 ${
                           baseCurrency === code
                             ? 'border-[#641f60] bg-[#641f60]/10 text-[#641f60]'
                             : 'border-slate-200 text-slate-600 hover:border-slate-300'
                         }`}
                       >
+                        <CurrencyBadge code={code} size={16} />
                         {code}
                       </button>
                     ))}
                   </div>
                 </div>
               )}
+
+              {/* Reference account currencies — configurable, defaulting to base */}
+              <div className="pt-2 border-t border-slate-100">
+                <p className="text-xs font-medium uppercase tracking-wide text-slate-500 mb-1">
+                  Reference account currencies
+                </p>
+                <p className="text-xs text-slate-400 mb-3">
+                  Set the currency each channel is held in. Defaults to the base currency ({baseCurrency}).
+                </p>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  {REFERENCE_ACCOUNTS.map((acc) => (
+                    <div key={acc} className="border border-slate-200 rounded-lg p-3 min-w-0">
+                      <div className="flex items-center gap-2 mb-2">
+                        <div className="w-8 h-8 rounded-full bg-slate-50 flex items-center justify-center shrink-0">
+                          <ChannelIcon channelKey={acc} className="w-4 h-4 text-slate-400" />
+                        </div>
+                        <span className="text-sm font-medium text-slate-700 truncate">
+                          {REFERENCE_ACCOUNT_LABELS[acc]}
+                        </span>
+                      </div>
+                      <label htmlFor={`acc-cur-${acc}`} className="sr-only">
+                        {REFERENCE_ACCOUNT_LABELS[acc]} currency
+                      </label>
+                      <FlagCurrencySelect
+                        value={accountCurrencies[acc] ?? baseCurrency}
+                        onChange={(code) => setAccountCurrency(acc, code)}
+                        options={accountCurrencyChoices}
+                        baseCurrency={baseCurrency}
+                      />
+                    </div>
+                  ))}
+                </div>
+              </div>
 
               <div className="flex flex-wrap items-center gap-3 pt-2 border-t border-slate-100">
                 <button
@@ -591,7 +993,7 @@ export function DailyOpeningPage() {
             </div>
           </div>
 
-          {/* Today's rates, sourced from Forex Trading */}
+          {/* Today's rates, sourced from Forex Trading — now live */}
           {currenciesNeedingRates.length > 0 && (
             <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
               <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between gap-3 flex-wrap">
@@ -606,15 +1008,7 @@ export function DailyOpeningPage() {
                     </p>
                   </div>
                 </div>
-                <button
-                  type="button"
-                  onClick={reloadFx}
-                  disabled={fxLoading}
-                  className="inline-flex items-center gap-2 px-3 py-1.5 text-sm font-medium rounded-lg border border-slate-200 text-slate-600 hover:border-[#641f60] hover:text-[#641f60] disabled:opacity-50 transition-all shrink-0"
-                >
-                  {fxLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
-                  Refresh
-                </button>
+                <LiveRatesBadge lastUpdated={lastRatesUpdate} loading={fxLoading} onRefresh={reloadFx} />
               </div>
 
               {fxError && (
@@ -628,10 +1022,12 @@ export function DailyOpeningPage() {
                   const source = rateSource(code);
                   const fx = lookupRate(fxRates, code, baseCurrency, 'buy');
                   return (
-                    <div key={code} className="border border-slate-200 rounded-lg p-3 min-w-0">
+                    <div key={code} className="border border-slate-200 rounded-lg p-3 min-w-0 transition-all hover:shadow-sm">
                       <div className="flex items-center justify-between gap-2 mb-1.5">
-                        <span className="text-sm font-medium text-slate-700 whitespace-nowrap">
-                          1 {code} = {baseCurrency}
+                        <span className="text-sm font-medium text-slate-700 whitespace-nowrap flex items-center gap-1.5">
+                          <CurrencyBadge code={code} size={16} />1 {code} =
+                          <CurrencyBadge code={baseCurrency} size={16} />
+                          {baseCurrency}
                         </span>
                         {source === 'forex' && (
                           <span className="text-[10px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded bg-[#1ebcb2]/10 text-[#1ebcb2] shrink-0">
@@ -694,38 +1090,42 @@ export function DailyOpeningPage() {
 
             <div className="p-6 space-y-3">
               <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
-                {rows.map((row) => (
-                  <div
-                    key={row.key}
-                    className="border border-slate-200 rounded-xl bg-white shadow-sm p-4 focus-within:border-[#1ebcb2] focus-within:ring-1 focus-within:ring-[#1ebcb2] hover:shadow-md transition-all min-w-0"
-                  >
-                    <div className="w-9 h-9 rounded-full bg-slate-50 flex items-center justify-center mx-auto mb-2">
-                      <ChannelIcon channelKey={row.key} className="w-4 h-4 text-slate-400" />
-                    </div>
-                    <label
-                      htmlFor={`open-${row.key}`}
-                      className="block text-center text-xs font-medium text-slate-600 mb-2 truncate"
-                      title={row.label}
+                {rows.map((row) => {
+                  const rowCurrency = currencyForKey(row.key, accountCurrencies, baseCurrency);
+                  const accent = channelAccent(row.key);
+                  return (
+                    <div
+                      key={row.key}
+                      className={`border border-slate-200 border-t-4 ${accent.border} rounded-xl bg-white shadow-sm p-4 focus-within:ring-1 focus-within:ring-[#1ebcb2] hover:shadow-md transition-all min-w-0`}
                     >
-                      {row.label}
-                    </label>
-                    <div className="relative">
-                      <span className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-xs font-medium text-slate-400">
-                        {currencyPrefix(row.key)}
-                      </span>
-                      <input
-                        id={`open-${row.key}`}
-                        type="number"
-                        step="0.01"
-                        min="0"
-                        value={row.amount}
-                        onChange={(e) => updateRow(row.key, e.target.value)}
-                        className="w-full min-w-0 box-border pl-10 pr-2 py-2 border border-slate-300 rounded-md text-right text-sm font-medium focus:outline-none focus:ring-2 focus:ring-[#1ebcb2] focus:border-transparent"
-                        placeholder="0.00"
-                      />
+                      <div className={`w-9 h-9 rounded-full ${accent.iconBg} flex items-center justify-center mx-auto mb-2`}>
+                        <ChannelIcon channelKey={row.key} className={`w-4 h-4 ${accent.iconColor}`} />
+                      </div>
+                      <label
+                        htmlFor={`open-${row.key}`}
+                        className="block text-center text-xs font-medium text-slate-600 mb-2 truncate"
+                        title={row.label}
+                      >
+                        {row.label}
+                      </label>
+                      <div className="relative">
+                        <span className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-xs font-medium text-slate-400">
+                          {rowCurrency}
+                        </span>
+                        <input
+                          id={`open-${row.key}`}
+                          type="number"
+                          step="0.01"
+                          min="0"
+                          value={row.amount}
+                          onChange={(e) => updateRow(row.key, e.target.value)}
+                          className="w-full min-w-0 box-border pl-10 pr-2 py-2 border border-slate-300 rounded-md text-right text-sm font-medium focus:outline-none focus:ring-2 focus:ring-[#1ebcb2] focus:border-transparent"
+                          placeholder="0.00"
+                        />
+                      </div>
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
 
               {formError && (
@@ -755,6 +1155,7 @@ export function DailyOpeningPage() {
               >
                 {submitting ? <Loader2 className="w-5 h-5 animate-spin" /> : <Sunrise className="w-5 h-5" />}
                 Confirm & Open
+                <ArrowRight className="w-4 h-4" />
               </button>
             </div>
           </div>

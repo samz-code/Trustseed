@@ -45,7 +45,7 @@ import {
 // Currency flags (shared visual language with Transactions / Float / Wallets)
 // ============================================================================
 
-const CURRENCIES = ['KES', 'USD', 'SSP', 'UGX', 'TZS', 'EUR', 'GBP'];
+const CURRENCIES = ['KES', 'USD', 'SSP', 'UGX', 'TZS', 'RWF', 'EUR', 'GBP'];
 
 const CURRENCY_NAMES: Record<string, string> = {
   USD: 'US Dollar',
@@ -53,6 +53,7 @@ const CURRENCY_NAMES: Record<string, string> = {
   SSP: 'South Sudanese Pound',
   UGX: 'Ugandan Shilling',
   TZS: 'Tanzanian Shilling',
+  RWF: 'Rwandan Franc',
   EUR: 'Euro',
   GBP: 'British Pound',
 };
@@ -123,6 +124,23 @@ function FlagGraphic({ code }: { code: string }) {
           <path d="M0 40 L40 0 v6 L6 40 Z" fill="#fcd116" />
           <path d="M0 40 L40 0 h-6 L0 34 Z" fill="#fcd116" />
           <path d="M0 34 L34 0 h-34 Z M40 6 L6 40 h34 Z" fill="#000" />
+        </>
+      );
+    case 'RWF':
+      return (
+        <>
+          <rect width="40" height="40" fill="#20603d" />
+          <rect width="40" height="26.67" fill="#00a1de" />
+          <rect y="20" width="40" height="6.67" fill="#fad201" />
+          <circle cx="31" cy="9" r="5" fill="#fad201" />
+          {Array.from({ length: 24 }).map((_, i) => {
+            const angle = (i * 15 * Math.PI) / 180;
+            const x1 = 31 + 4 * Math.sin(angle);
+            const y1 = 9 - 4 * Math.cos(angle);
+            const x2 = 31 + 5 * Math.sin(angle);
+            const y2 = 9 - 5 * Math.cos(angle);
+            return <line key={i} x1={x1} y1={y1} x2={x2} y2={y2} stroke="#e5be01" strokeWidth="0.6" />;
+          })}
         </>
       );
     case 'EUR':

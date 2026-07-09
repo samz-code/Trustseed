@@ -19,9 +19,14 @@ import {
   ShieldCheck,
   UserCog,
   Info,
+  Building2,
 } from 'lucide-react';
 
 type TenantAdmin = Tables<'tenant_admins'>;
+
+// tenant_admins may not carry branch_id in the generated types yet; read it
+// defensively so the UI works whether or not the column is typed.
+type TenantAdminWithBranch = TenantAdmin & { branch_id?: string | null };
 
 interface RoleMeta {
   value: UserRole;
@@ -45,6 +50,19 @@ const ROLES: RoleMeta[] = [
   { value: 'auditor', label: 'Auditor', description: 'Read-only access for audit and review.' },
 ];
 
+// Roles that inherently see every branch; they are NOT tied to a single branch.
+// Every other role is branch-scoped and must be assigned to a branch so that
+// branch users only access their own branch's data.
+const ALL_BRANCH_ROLES = new Set<UserRole | 'super_admin'>([
+  'super_admin' as UserRole,
+  'institution_admin',
+  'head_office_admin',
+]);
+
+function isAllBranchRole(role: string): boolean {
+  return ALL_BRANCH_ROLES.has(role as UserRole);
+}
+
 const ROLE_LABELS: Record<string, string> = ROLES.reduce(
   (acc, r) => {
     acc[r.value] = r.label;
@@ -57,11 +75,33 @@ function roleLabel(role: string): string {
   return ROLE_LABELS[role] ?? role.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
+// Supabase client errors are plain objects, not Error instances — surface the
+// most useful field so the UI shows the real reason instead of a generic one.
+function supabaseErrorMessage(err: unknown, fallback: string): string {
+  if (err instanceof Error) return err.message;
+  const e = err as { message?: string; details?: string; hint?: string } | null;
+  return e?.message || e?.details || e?.hint || fallback;
+}
+
+// Detects the "branch_id column doesn't exist yet" case — a PostgREST schema
+// cache miss (PGRST204) or Postgres undefined_column (42703) — so we can save
+// the rest of the record and warn instead of failing the whole update.
+function isMissingBranchColumn(err: unknown): boolean {
+  const e = err as { code?: string; message?: string } | null;
+  const msg = (e?.message || '').toLowerCase();
+  return (
+    e?.code === 'PGRST204' ||
+    e?.code === '42703' ||
+    (msg.includes('branch_id') && (msg.includes('column') || msg.includes('schema')))
+  );
+}
+
 interface InviteForm {
   full_name: string;
   email: string;
   phone: string;
   role: UserRole;
+  branch_id: string;
 }
 
 const EMPTY_FORM: InviteForm = {
@@ -69,22 +109,25 @@ const EMPTY_FORM: InviteForm = {
   email: '',
   phone: '',
   role: 'teller',
+  branch_id: '',
 };
 
 export function UsersRolesPage() {
-  const { tenant, admin } = useAuth();
+  const { tenant, admin, branches } = useAuth();
 
-  const [members, setMembers] = useState<TenantAdmin[]>([]);
+  const [members, setMembers] = useState<TenantAdminWithBranch[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'pending' | 'inactive'>('all');
+  const [branchFilter, setBranchFilter] = useState<'all' | string>('all');
 
   const [showForm, setShowForm] = useState(false);
-  const [editingMember, setEditingMember] = useState<TenantAdmin | null>(null);
+  const [editingMember, setEditingMember] = useState<TenantAdminWithBranch | null>(null);
   const [formData, setFormData] = useState<InviteForm>(EMPTY_FORM);
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [togglingId, setTogglingId] = useState<string | null>(null);
 
   // Only admins who own the institution may manage users.
@@ -92,6 +135,20 @@ export function UsersRolesPage() {
     admin?.role === 'super_admin' ||
     admin?.role === 'institution_admin' ||
     admin?.role === 'head_office_admin';
+
+  const activeBranches = useMemo(
+    () => branches.filter((b) => b.status === 'active' || b.status === undefined),
+    [branches]
+  );
+
+  const branchName = useCallback(
+    (id: string | null | undefined): string => {
+      if (!id) return 'All branches';
+      const b = branches.find((br) => br.id === id);
+      return b ? b.name : 'Unknown branch';
+    },
+    [branches]
+  );
 
   const loadMembers = useCallback(async () => {
     if (!tenant) return;
@@ -104,7 +161,7 @@ export function UsersRolesPage() {
         .eq('tenant_id', tenant.id)
         .order('created_at', { ascending: false });
       if (error) throw error;
-      setMembers(data ?? []);
+      setMembers((data ?? []) as TenantAdminWithBranch[]);
     } catch (err) {
       console.error('Error loading team members:', err);
       setLoadError(err instanceof Error ? err.message : 'Failed to load team members');
@@ -122,20 +179,27 @@ export function UsersRolesPage() {
     const q = searchQuery.trim().toLowerCase();
     return members.filter((m) => {
       const matchesStatus = statusFilter === 'all' || m.status === statusFilter;
+      const matchesBranch =
+        branchFilter === 'all' ||
+        (branchFilter === 'none' ? !m.branch_id : m.branch_id === branchFilter);
       const matchesSearch =
         q === '' ||
         m.full_name.toLowerCase().includes(q) ||
         m.email.toLowerCase().includes(q) ||
-        roleLabel(m.role).toLowerCase().includes(q);
-      return matchesStatus && matchesSearch;
+        roleLabel(m.role).toLowerCase().includes(q) ||
+        branchName(m.branch_id).toLowerCase().includes(q);
+      return matchesStatus && matchesBranch && matchesSearch;
     });
-  }, [members, searchQuery, statusFilter]);
+  }, [members, searchQuery, statusFilter, branchFilter, branchName]);
 
   const validateForm = (): string | null => {
     if (!formData.full_name.trim()) return 'Full name is required.';
     if (!formData.email.trim()) return 'Email is required.';
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(formData.email.trim())) {
       return 'Please enter a valid email address.';
+    }
+    if (!isAllBranchRole(formData.role) && !formData.branch_id) {
+      return 'Please assign a branch for this branch-level role.';
     }
     if (!editingMember) {
       const exists = members.some(
@@ -150,18 +214,21 @@ export function UsersRolesPage() {
     setEditingMember(null);
     setFormData(EMPTY_FORM);
     setFormError(null);
+    setNotice(null);
     setShowForm(true);
   };
 
-  const openEdit = (member: TenantAdmin) => {
+  const openEdit = (member: TenantAdminWithBranch) => {
     setEditingMember(member);
     setFormData({
       full_name: member.full_name,
       email: member.email,
       phone: member.phone ?? '',
       role: member.role,
+      branch_id: member.branch_id ?? '',
     });
     setFormError(null);
+    setNotice(null);
     setShowForm(true);
   };
 
@@ -170,6 +237,17 @@ export function UsersRolesPage() {
     setEditingMember(null);
     setFormData(EMPTY_FORM);
     setFormError(null);
+    setNotice(null);
+  };
+
+  // When the selected role becomes an all-branch role, clear the branch so we
+  // don't persist a stale branch assignment.
+  const handleRoleChange = (role: UserRole) => {
+    setFormData((prev) => ({
+      ...prev,
+      role,
+      branch_id: isAllBranchRole(role) ? '' : prev.branch_id,
+    }));
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -191,26 +269,56 @@ export function UsersRolesPage() {
       return;
     }
 
+    // All-branch roles are never tied to a branch; branch-level roles carry
+    // their assigned branch so their dashboard/data stays scoped to it.
+    const resolvedBranchId = isAllBranchRole(formData.role) ? null : formData.branch_id || null;
+
+    const MISSING_COLUMN_NOTICE =
+      'Saved — but the branch assignment could not be stored because the tenant_admins.branch_id column is missing. ' +
+      'Run the migration to add it, then re-save to enable branch scoping.';
+
     setSubmitting(true);
+    setNotice(null);
+    let hadNotice = false;
     try {
       if (editingMember) {
-        // Editing: update name, phone, role. Email is the identity key and is
-        // locked once created (matching how the person signs in).
-        const { error } = await supabase
+        // Editing: update name, phone, role, branch. Email is the identity key
+        // and is locked once created (matching how the person signs in).
+        const fullPayload = {
+          full_name: formData.full_name.trim(),
+          phone: formData.phone.trim() || null,
+          role: formData.role,
+          branch_id: resolvedBranchId,
+        };
+
+        let { error } = await supabase
           .from('tenant_admins')
-          .update({
-            full_name: formData.full_name.trim(),
-            phone: formData.phone.trim() || null,
-            role: formData.role,
-          })
+          .update(fullPayload as never)
           .eq('id', editingMember.id)
           .eq('tenant_id', tenant.id);
+
+        // If branch_id isn't in the schema yet, retry without it so the rest
+        // of the record still saves, and flag the missing column.
+        if (error && isMissingBranchColumn(error)) {
+          const { branch_id: _omit, ...withoutBranch } = fullPayload;
+          void _omit;
+          const retry = await supabase
+            .from('tenant_admins')
+            .update(withoutBranch as never)
+            .eq('id', editingMember.id)
+            .eq('tenant_id', tenant.id);
+          error = retry.error;
+          if (!error) {
+            hadNotice = true;
+            setNotice(MISSING_COLUMN_NOTICE);
+          }
+        }
         if (error) throw error;
       } else {
         // Invite: create a pending tenant_admins row keyed by email, with no
         // user_id yet. The person gains access when they sign in with this
         // email and the app links their auth user to this row.
-        const insert: InsertTables<'tenant_admins'> = {
+        const fullInsert = {
           tenant_id: tenant.id,
           user_id: null,
           email: formData.email.trim().toLowerCase(),
@@ -218,27 +326,76 @@ export function UsersRolesPage() {
           role: formData.role,
           phone: formData.phone.trim() || null,
           status: 'pending',
+          branch_id: resolvedBranchId,
         };
-        const { error } = await supabase.from('tenant_admins').insert(insert);
+
+        let { error } = await supabase
+          .from('tenant_admins')
+          .insert(fullInsert as InsertTables<'tenant_admins'>);
+
+        if (error && isMissingBranchColumn(error)) {
+          const { branch_id: _omit, ...withoutBranch } = fullInsert;
+          void _omit;
+          const retry = await supabase
+            .from('tenant_admins')
+            .insert(withoutBranch as InsertTables<'tenant_admins'>);
+          error = retry.error;
+          if (!error) {
+            hadNotice = true;
+            setNotice(
+              'Invite created — but the branch assignment could not be stored because the ' +
+                'tenant_admins.branch_id column is missing. Run the migration to add it.'
+            );
+          }
+        }
+
         if (error) {
           if ((error as { code?: string }).code === '23505') {
             throw new Error('A team member with this email already exists.');
           }
           throw error;
         }
+
+        // Send the invitation email via the send-invite Edge Function. This is
+        // non-fatal: the pending member row already exists, so a mail failure
+        // must not roll it back — we just tell the admin what happened.
+        try {
+          const inviteBranchName = isAllBranchRole(formData.role)
+            ? 'All branches'
+            : branches.find((b) => b.id === resolvedBranchId)?.name ?? null;
+          const { error: mailError } = await supabase.functions.invoke('send-invite', {
+            body: {
+              email: formData.email.trim().toLowerCase(),
+              full_name: formData.full_name.trim(),
+              role: formData.role,
+              branch_name: inviteBranchName,
+            },
+          });
+          if (mailError) throw mailError;
+        } catch (mailErr) {
+          console.error('Invite email failed:', mailErr);
+          hadNotice = true;
+          setNotice(
+            'Team member added, but the invitation email could not be sent (' +
+              supabaseErrorMessage(mailErr, 'unknown error') +
+              '). They can still sign in with this email to gain access.'
+          );
+        }
       }
 
       await loadMembers();
-      closeForm();
+      // Keep the modal open when we surfaced a non-fatal notice so the user
+      // sees why branch assignment didn't persist; otherwise close.
+      if (!hadNotice) closeForm();
     } catch (err) {
       console.error('Error saving team member:', err);
-      setFormError(err instanceof Error ? err.message : 'Failed to save team member');
+      setFormError(supabaseErrorMessage(err, 'Failed to save team member'));
     } finally {
       setSubmitting(false);
     }
   };
 
-  const toggleStatus = async (member: TenantAdmin) => {
+  const toggleStatus = async (member: TenantAdminWithBranch) => {
     if (!tenant || !canManage) return;
     // Guard: an admin cannot deactivate their own account (locking themselves out).
     if (member.id === admin?.id) {
@@ -300,7 +457,7 @@ export function UsersRolesPage() {
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold text-[#641f60]">Users &amp; Roles</h1>
-          <p className="text-slate-600 mt-1">Manage team members and their access levels</p>
+          <p className="text-slate-600 mt-1">Manage team members, their roles, and branch access</p>
         </div>
         {canManage && (
           <button
@@ -379,10 +536,25 @@ export function UsersRolesPage() {
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search by name, email, or role..."
+              placeholder="Search by name, email, role, or branch..."
               className="w-full pl-10 pr-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#1ebcb2] focus:border-transparent"
             />
           </div>
+          {branches.length > 1 && (
+            <select
+              value={branchFilter}
+              onChange={(e) => setBranchFilter(e.target.value)}
+              className="px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#1ebcb2] focus:border-transparent"
+            >
+              <option value="all">All Branches</option>
+              <option value="none">All-branch roles</option>
+              {branches.map((b) => (
+                <option key={b.id} value={b.id}>
+                  {b.name}
+                </option>
+              ))}
+            </select>
+          )}
           <select
             value={statusFilter}
             onChange={(e) => setStatusFilter(e.target.value as typeof statusFilter)}
@@ -406,6 +578,7 @@ export function UsersRolesPage() {
           <div className="divide-y divide-slate-100">
             {filteredMembers.map((member) => {
               const isSelf = member.id === admin?.id;
+              const allBranch = isAllBranchRole(member.role);
               return (
                 <div
                   key={member.id}
@@ -413,8 +586,8 @@ export function UsersRolesPage() {
                     member.status === 'inactive' ? 'opacity-60' : ''
                   }`}
                 >
-                  <div className="flex items-center gap-4">
-                    <div className="w-11 h-11 rounded-full bg-gradient-to-br from-[#641f60] to-[#4a1646] flex items-center justify-center text-white font-medium flex-shrink-0">
+                  <div className="flex items-center gap-4 flex-wrap sm:flex-nowrap">
+                    <div className="w-11 h-11 rounded-full bg-[#641f60] flex items-center justify-center text-white font-medium flex-shrink-0">
                       {initials(member.full_name || member.email)}
                     </div>
                     <div className="flex-1 min-w-0">
@@ -429,7 +602,15 @@ export function UsersRolesPage() {
                         {member.email}
                       </p>
                     </div>
-                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium bg-[#641f60]/10 text-[#641f60]">
+                    <span
+                      className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium flex-shrink-0 ${
+                        allBranch ? 'bg-[#641f60]/10 text-[#641f60]' : 'bg-slate-100 text-slate-600'
+                      }`}
+                    >
+                      <Building2 className="w-3.5 h-3.5" />
+                      {allBranch ? 'All branches' : branchName(member.branch_id)}
+                    </span>
+                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium bg-[#641f60]/10 text-[#641f60] flex-shrink-0">
                       <ShieldCheck className="w-3.5 h-3.5" />
                       {roleLabel(member.role)}
                     </span>
@@ -437,6 +618,7 @@ export function UsersRolesPage() {
                     {canManage && (
                       <div className="flex items-center gap-1 flex-shrink-0">
                         <button
+                          type="button"
                           onClick={() => openEdit(member)}
                           className="p-2 rounded-lg text-slate-400 hover:text-[#641f60] hover:bg-slate-100 transition-colors"
                           aria-label="Edit member"
@@ -444,6 +626,7 @@ export function UsersRolesPage() {
                           <Pencil className="w-5 h-5" />
                         </button>
                         <button
+                          type="button"
                           onClick={() => toggleStatus(member)}
                           disabled={togglingId === member.id || isSelf}
                           title={isSelf ? 'You cannot deactivate your own account' : undefined}
@@ -472,12 +655,13 @@ export function UsersRolesPage() {
             </div>
             <h3 className="text-lg font-semibold text-slate-900 mb-1">No team members found</h3>
             <p className="text-slate-500 text-center max-w-sm">
-              {searchQuery || statusFilter !== 'all'
+              {searchQuery || statusFilter !== 'all' || branchFilter !== 'all'
                 ? 'No members match your search or filter.'
                 : 'Invite your first team member to get started.'}
             </p>
-            {canManage && !searchQuery && statusFilter === 'all' && (
+            {canManage && !searchQuery && statusFilter === 'all' && branchFilter === 'all' && (
               <button
+                type="button"
                 onClick={openInvite}
                 className="mt-4 inline-flex items-center gap-2 px-4 py-2 bg-[#ee7b22] hover:bg-[#c46040] text-white font-medium rounded-lg transition-colors"
               >
@@ -498,6 +682,7 @@ export function UsersRolesPage() {
                 {editingMember ? 'Edit Team Member' : 'Invite Team Member'}
               </h2>
               <button
+                type="button"
                 onClick={closeForm}
                 className="p-2 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition-colors"
                 aria-label="Close"
@@ -559,7 +744,7 @@ export function UsersRolesPage() {
                 <label className="block text-sm font-medium text-slate-700 mb-1">Role *</label>
                 <select
                   value={formData.role}
-                  onChange={(e) => setFormData((prev) => ({ ...prev, role: e.target.value as UserRole }))}
+                  onChange={(e) => handleRoleChange(e.target.value as UserRole)}
                   className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#1ebcb2] focus:border-transparent"
                 >
                   {ROLES.map((r) => (
@@ -572,6 +757,42 @@ export function UsersRolesPage() {
                   {ROLES.find((r) => r.value === formData.role)?.description}
                 </p>
               </div>
+
+              {/* Branch assignment — only for branch-level roles. All-branch
+                  roles (institution / head office) see every branch. */}
+              {isAllBranchRole(formData.role) ? (
+                <div className="p-3 bg-[#1ebcb2]/5 border border-[#1ebcb2]/20 rounded-lg text-sm text-slate-600 flex items-start gap-2">
+                  <Building2 className="w-4 h-4 flex-shrink-0 mt-0.5 text-[#1ebcb2]" />
+                  This role has access to <span className="font-medium">all branches</span> and isn&rsquo;t tied to a single one.
+                </div>
+              ) : (
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Branch *</label>
+                  <select
+                    value={formData.branch_id}
+                    onChange={(e) => setFormData((prev) => ({ ...prev, branch_id: e.target.value }))}
+                    className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#1ebcb2] focus:border-transparent"
+                  >
+                    <option value="">Select a branch</option>
+                    {activeBranches.map((b) => (
+                      <option key={b.id} value={b.id}>
+                        {b.name}
+                        {b.is_head_office ? ' (HQ)' : ''}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="text-xs text-slate-400 mt-1">
+                    This user will only be able to access and manage this branch&rsquo;s data.
+                  </p>
+                </div>
+              )}
+
+              {notice && (
+                <div className="p-3 bg-[#ee7b22]/10 border border-[#ee7b22]/30 rounded-lg text-[#8a4a12] text-sm flex items-start gap-2">
+                  <Info className="w-4 h-4 flex-shrink-0 mt-0.5 text-[#ee7b22]" />
+                  <span>{notice}</span>
+                </div>
+              )}
 
               {formError && (
                 <div className="p-3 bg-[#c46040]/10 border border-[#c46040]/30 rounded-lg text-[#c46040] text-sm">

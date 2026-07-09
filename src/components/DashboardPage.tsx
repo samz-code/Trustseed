@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { supabase } from '../lib/supabase';
 import { fetchExpenseSummary, type ExpenseSummary } from '../lib/expenses';
+import { formatMoney, currencyFlag } from '../lib/accountCurrencies';
 import {
   Users,
   Wallet,
@@ -44,6 +45,7 @@ interface RecentTx {
 interface FloatRow {
   balance: number;
   branch_id: string | null;
+  currency: string | null;
 }
 
 interface PendingApproval {
@@ -66,6 +68,8 @@ interface DashboardData {
   savingsCount: number;
   savingsTotal: number;
   floatTotal: number;
+  floatCurrency: string;
+  floatCurrencyCount: number;
   floatAccountCount: number;
   recentTransactions: RecentTx[];
   pendingApprovals: PendingApproval[];
@@ -82,6 +86,8 @@ const EMPTY: DashboardData = {
   savingsCount: 0,
   savingsTotal: 0,
   floatTotal: 0,
+  floatCurrency: 'KES',
+  floatCurrencyCount: 0,
   floatAccountCount: 0,
   recentTransactions: [],
   pendingApprovals: [],
@@ -93,11 +99,6 @@ const EMPTY_EXPENSES: ExpenseSummary = {
   pendingCount: 0,
   pendingTotal: 0,
 };
-
-function formatMoney(value: number, currency = 'KES'): string {
-  const symbol = currency === 'USD' ? '$' : currency === 'KES' ? 'KSh ' : `${currency} `;
-  return `${symbol}${value.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
-}
 
 function formatTime(iso: string): string {
   const d = new Date(iso);
@@ -123,8 +124,12 @@ export function DashboardPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // Prefer the institution base currency (shared with Daily Operations),
+  // falling back to the legacy default_currency, then KES.
   const defaultCurrency =
-    (tenant?.settings as { default_currency?: string } | null)?.default_currency || 'KES';
+    (tenant?.settings as { base_currency?: string; default_currency?: string } | null)?.base_currency ||
+    (tenant?.settings as { default_currency?: string } | null)?.default_currency ||
+    'KES';
 
   // Whether to scope to the selected branch. Head office / super admin see the
   // whole tenant; branch-level roles are scoped to their branch.
@@ -196,38 +201,62 @@ export function DashboardPage() {
       const savingsTotal = savings.reduce((sum, s) => sum + Number(s.balance || 0), 0);
 
       // --- Float (cash-on-hand across float accounts) ---
-      // Filtered to the tenant's default currency, same convention formatMoney
-      // uses everywhere else on this page. Unlike wallets/savings/loans,
-      // float accounts can be tenant-wide (branch_id IS NULL, e.g. head
-      // office reserves) as well as branch-scoped, so branch-restricted
-      // roles need an OR filter rather than a plain .eq — otherwise
-      // tenant-wide float would silently disappear from their view (same
-      // pattern FloatPage itself uses for `filteredAccounts`).
-      // Cast: `float_accounts` isn't in the generated Supabase types yet,
-      // so without this TypeScript infers `never` for the row shape and
-      // errors on every field access below. Regenerate types once the
-      // table is included, then this cast (and the FloatRow annotation)
-      // can go away.
+      // IMPORTANT: do NOT filter by a single currency here. Float accounts are
+      // held per-currency (KES float, USD float, etc.), and hard-filtering to
+      // the tenant default currency silently hides every account in another
+      // currency — which is exactly why the Float Balance card previously read
+      // "$0 / 0 accounts" while the Float page showed KES 500,000. Instead we
+      // read every active float account and group by its own currency below.
+      //
+      // Float accounts can be tenant-wide (branch_id IS NULL, e.g. head-office
+      // reserves) as well as branch-scoped, so branch-restricted roles need an
+      // OR filter rather than a plain .eq — otherwise tenant-wide float would
+      // disappear from their view (same pattern the Float page uses).
+      //
+      // Cast: `float_accounts` isn't in the generated Supabase types yet, so
+      // without this TypeScript infers `never` for the row shape. Regenerate
+      // types once the table is included and this cast can go away.
       let floatQuery = (supabase.from('float_accounts') as any)
-        .select('balance, branch_id')
+        .select('balance, branch_id, currency')
         .eq('tenant_id', tenant!.id)
-        .eq('status', 'active')
-        .eq('currency', defaultCurrency);
+        .eq('status', 'active');
       if (!seesAllBranches && branchId) {
         floatQuery = floatQuery.or(`branch_id.eq.${branchId},branch_id.is.null`);
       }
       const floatRes = await floatQuery;
       if (floatRes.error) throw floatRes.error;
       const floatAccounts = (floatRes.data ?? []) as FloatRow[];
-      const floatTotal = floatAccounts.reduce((sum, f) => sum + Number(f.balance || 0), 0);
+
+      // Group float balances by their own currency.
+      const floatByCurrency = new Map<string, { total: number; count: number }>();
+      floatAccounts.forEach((f) => {
+        const code = f.currency || defaultCurrency;
+        const entry = floatByCurrency.get(code) ?? { total: 0, count: 0 };
+        entry.total += Number(f.balance || 0);
+        entry.count += 1;
+        floatByCurrency.set(code, entry);
+      });
+
+      // Pick the currency to headline on the single Float card: the base/default
+      // currency when it actually holds float, otherwise the currency with the
+      // largest balance. The account count still reflects ALL float accounts.
+      let floatCurrency = defaultCurrency;
+      if (floatByCurrency.size > 0) {
+        floatCurrency = floatByCurrency.has(defaultCurrency)
+          ? defaultCurrency
+          : Array.from(floatByCurrency.entries()).sort((a, b) => b[1].total - a[1].total)[0][0];
+      }
+      const floatTotal = floatByCurrency.get(floatCurrency)?.total ?? 0;
+      const floatAccountCount = floatAccounts.length;
+      const floatCurrencyCount = floatByCurrency.size;
 
       // --- Today's transactions (deposits/withdrawals totals) ---
       let todayTxQuery = supabase
         .from('transactions')
         .select('transaction_type, amount, branch_id')
-       .eq('tenant_id', tenant!.id)
-       .gte('created_at', todayIso)
-       .in('status', ['completed', 'approved', 'processing']);
+        .eq('tenant_id', tenant!.id)
+        .gte('created_at', todayIso)
+        .in('status', ['completed', 'approved', 'processing']);
       todayTxQuery = scopeBranch(todayTxQuery);
       const todayTxRes = await todayTxQuery;
       if (todayTxRes.error) throw todayTxRes.error;
@@ -248,6 +277,7 @@ export function DashboardPage() {
         .select(
           'id, transaction_type, amount, currency, status, created_at, from_customer_id, branch_id'
         )
+        .eq('tenant_id', tenant!.id)
         .order('created_at', { ascending: false })
         .limit(6);
       recentQuery = scopeBranch(recentQuery);
@@ -279,23 +309,32 @@ export function DashboardPage() {
       }));
 
       // --- Pending approvals ---
+      // Scoped through the linked transaction's tenant/branch below so that a
+      // branch manager only sees approvals for their own branch.
       const approvalsRes = await supabase
         .from('transaction_approvals')
         .select('id, transaction_id, required_role, status, created_at')
         .eq('status', 'pending')
         .order('created_at', { ascending: false })
-        .limit(6);
+        .limit(20);
       if (approvalsRes.error) throw approvalsRes.error;
       const approvalRows = approvalsRes.data ?? [];
 
-      // Fetch the linked transactions for amount/type.
+      // Fetch the linked transactions for amount/type, scoped to this tenant
+      // (and branch when applicable) so cross-tenant/branch rows are excluded.
       const txIds = Array.from(new Set(approvalRows.map((a) => a.transaction_id)));
-      const txMap = new Map<string, { transaction_type: string; amount: number; currency: string }>();
+      const txMap = new Map<
+        string,
+        { transaction_type: string; amount: number; currency: string }
+      >();
       if (txIds.length > 0) {
-        const txRes = await supabase
+        let txQuery = supabase
           .from('transactions')
-          .select('id, transaction_type, amount, currency')
+          .select('id, transaction_type, amount, currency, branch_id')
+          .eq('tenant_id', tenant!.id)
           .in('id', txIds);
+        txQuery = scopeBranch(txQuery);
+        const txRes = await txQuery;
         if (txRes.error) throw txRes.error;
         (txRes.data ?? []).forEach((t) =>
           txMap.set(t.id, {
@@ -305,17 +344,20 @@ export function DashboardPage() {
           })
         );
       }
-      const pendingApprovals: PendingApproval[] = approvalRows.map((a) => {
-        const tx = txMap.get(a.transaction_id);
-        return {
-          id: a.id,
-          transaction_type: tx?.transaction_type ?? 'transaction',
-          amount: tx?.amount ?? 0,
-          currency: tx?.currency ?? defaultCurrency,
-          required_role: a.required_role,
-          created_at: a.created_at,
-        };
-      });
+      const pendingApprovals: PendingApproval[] = approvalRows
+        .filter((a) => txMap.has(a.transaction_id)) // drop out-of-scope approvals
+        .slice(0, 6)
+        .map((a) => {
+          const tx = txMap.get(a.transaction_id)!;
+          return {
+            id: a.id,
+            transaction_type: tx.transaction_type,
+            amount: tx.amount,
+            currency: tx.currency || defaultCurrency,
+            required_role: a.required_role,
+            created_at: a.created_at,
+          };
+        });
 
       // --- Expenses summary ---
       const expSummary = await fetchExpenseSummary(
@@ -334,7 +376,9 @@ export function DashboardPage() {
         savingsCount: savings.length,
         savingsTotal,
         floatTotal,
-        floatAccountCount: floatAccounts.length,
+        floatCurrency,
+        floatCurrencyCount,
+        floatAccountCount,
         recentTransactions,
         pendingApprovals,
       });
@@ -353,6 +397,13 @@ export function DashboardPage() {
     loadDashboard();
   }, [loadDashboard]);
 
+  // Float card change chip: account count, plus a hint when float spans
+  // multiple currencies (since the headline value shows only one of them).
+  const floatChange =
+    data.floatCurrencyCount > 1
+      ? `${data.floatAccountCount} account${data.floatAccountCount === 1 ? '' : 's'} · ${data.floatCurrencyCount} currencies`
+      : `${data.floatAccountCount} account${data.floatAccountCount === 1 ? '' : 's'}`;
+
   // Each card below is assigned a unique color key so no two tiles share a
   // color. There are exactly 8 stat cards and 8 color keys defined in
   // `tileClasses` (5 base brand colors + 3 derived tints/shades), so every
@@ -368,8 +419,8 @@ export function DashboardPage() {
     },
     {
       label: 'Float Balance',
-      value: formatMoney(data.floatTotal, defaultCurrency),
-      change: `${data.floatAccountCount} account${data.floatAccountCount === 1 ? '' : 's'}`,
+      value: `${currencyFlag(data.floatCurrency)} ${formatMoney(data.floatTotal, data.floatCurrency)}`,
+      change: floatChange,
       changeType: 'neutral',
       icon: <Landmark className="w-6 h-6" />,
       color: 'orange', // #ee7b22

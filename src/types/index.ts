@@ -1,5 +1,3 @@
-import { ReactNode } from "react";
-
 export type Tenant = {
   id: string;
   name: string;
@@ -142,7 +140,7 @@ export type Wallet = {
 
 export type SavingsProduct = {
   min_opening_balance: number;
-  min_balance: ReactNode;
+  min_balance: number;
   id: string;
   tenant_id: string;
   name: string;

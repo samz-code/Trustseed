@@ -60,6 +60,13 @@ const TYPE_COLORS: Record<AccountType, { bg: string; text: string }> = {
   expense: { bg: 'bg-[#c46040]/10', text: 'text-[#c46040]' },
 };
 
+// Singular label for a type (e.g. "Assets" -> "Asset"), safe even if a label
+// doesn't happen to end in "s".
+function singularType(type: AccountType): string {
+  const label = ACCOUNT_TYPES.find((t) => t.value === type)?.label ?? type;
+  return label.endsWith('s') ? label.slice(0, -1) : label;
+}
+
 export function ChartOfAccountsPage() {
   const { tenant } = useAuth();
   const [accounts, setAccounts] = useState<Account[]>([]);
@@ -122,10 +129,15 @@ export function ChartOfAccountsPage() {
       expense: [],
     };
     for (const a of filteredAccounts) {
-      groups[a.account_type].push(a);
+      // Guard against unexpected/legacy account types not in the known set,
+      // so a stray value can never crash the grouping.
+      if (groups[a.account_type]) groups[a.account_type].push(a);
     }
     return groups;
   }, [filteredAccounts]);
+
+  const isSearching = searchQuery.trim() !== '';
+  const noSearchResults = isSearching && filteredAccounts.length === 0;
 
   const toggleTypeCollapsed = (type: AccountType) => {
     setCollapsedTypes((prev) => {
@@ -271,8 +283,8 @@ export function ChartOfAccountsPage() {
   };
 
   // Candidate parents: same account_type, excluding the account being edited
-  // (an account cannot be its own parent) and excluding its own descendants
-  // is not enforced here (single-level hierarchy assumed, matching the schema).
+  // (an account cannot be its own parent). Descendant exclusion is not enforced
+  // here (single-level hierarchy assumed, matching the schema).
   const parentCandidates = accounts.filter(
     (a) => a.account_type === formData.account_type && a.id !== editingAccount?.id
   );
@@ -352,6 +364,22 @@ export function ChartOfAccountsPage() {
             Add First Account
           </button>
         </div>
+      ) : noSearchResults ? (
+        <div className="bg-white rounded-xl border border-slate-200 flex flex-col items-center justify-center py-12 px-4">
+          <div className="w-16 h-16 rounded-full bg-slate-100 flex items-center justify-center mb-4">
+            <Search className="w-8 h-8 text-slate-400" />
+          </div>
+          <h3 className="text-lg font-semibold text-slate-900 mb-1">No matching accounts</h3>
+          <p className="text-slate-500 text-center max-w-sm">
+            Nothing matches &ldquo;{searchQuery.trim()}&rdquo;. Try a different code, name, or category.
+          </p>
+          <button
+            onClick={() => setSearchQuery('')}
+            className="mt-4 inline-flex items-center gap-2 px-4 py-2 border border-slate-300 text-slate-700 font-medium rounded-lg hover:bg-slate-50 transition-colors"
+          >
+            Clear search
+          </button>
+        </div>
       ) : (
         <div className="space-y-4">
           {ACCOUNT_TYPES.map(({ value: type, label, icon }) => {
@@ -360,41 +388,50 @@ export function ChartOfAccountsPage() {
             const colors = TYPE_COLORS[type];
             const typeTotal = list.length;
 
-            if (list.length === 0 && searchQuery.trim() !== '') return null;
+            if (list.length === 0 && isSearching) return null;
 
             return (
               <div key={type} className="bg-white rounded-xl border border-slate-200 overflow-hidden">
-                <button
-                  onClick={() => toggleTypeCollapsed(type)}
-                  className="w-full px-5 py-4 flex items-center justify-between hover:bg-slate-50 transition-colors"
-                >
-                  <div className="flex items-center gap-3">
+                {/* Header row: not a <button>, so it can safely contain the
+                    "Add" and collapse buttons without nesting buttons. */}
+                <div className="w-full px-5 py-4 flex items-center justify-between gap-3">
+                  <button
+                    type="button"
+                    onClick={() => toggleTypeCollapsed(type)}
+                    aria-expanded={!isCollapsed}
+                    className="flex items-center gap-3 flex-1 min-w-0 text-left rounded-lg -mx-1 px-1 py-1 hover:bg-slate-50 transition-colors"
+                  >
                     <div className={`p-2 rounded-lg ${colors.bg} ${colors.text}`}>{icon}</div>
                     <h2 className="font-semibold text-slate-900">{label}</h2>
                     <span className="text-xs text-slate-400">
                       {typeTotal} account{typeTotal === 1 ? '' : 's'}
                     </span>
-                  </div>
-                  <div className="flex items-center gap-3">
+                  </button>
+                  <div className="flex items-center gap-3 flex-shrink-0">
                     <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        openCreateForm(type);
-                      }}
+                      type="button"
+                      onClick={() => openCreateForm(type)}
                       className="text-xs font-medium text-[#1ebcb2] hover:text-[#641f60] transition-colors"
                     >
                       + Add
                     </button>
-                    {isCollapsed ? (
-                      <ChevronRight className="w-5 h-5 text-slate-400" />
-                    ) : (
-                      <ChevronDown className="w-5 h-5 text-slate-400" />
-                    )}
+                    <button
+                      type="button"
+                      onClick={() => toggleTypeCollapsed(type)}
+                      aria-label={isCollapsed ? `Expand ${label}` : `Collapse ${label}`}
+                      className="p-1 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition-colors"
+                    >
+                      {isCollapsed ? (
+                        <ChevronRight className="w-5 h-5" />
+                      ) : (
+                        <ChevronDown className="w-5 h-5" />
+                      )}
+                    </button>
                   </div>
-                </button>
+                </div>
 
                 {!isCollapsed && (
-                  <div className="divide-y divide-slate-100">
+                  <div className="divide-y divide-slate-100 border-t border-slate-100">
                     {list.length === 0 ? (
                       <div className="px-5 py-6 text-center text-sm text-slate-400">
                         No {label.toLowerCase()} accounts yet.
@@ -443,6 +480,7 @@ export function ChartOfAccountsPage() {
                           </span>
                           <div className="flex items-center gap-1 flex-shrink-0">
                             <button
+                              type="button"
                               onClick={() => openEditForm(account)}
                               className="p-2 rounded-lg text-slate-400 hover:text-[#641f60] hover:bg-slate-100 transition-colors"
                               aria-label="Edit account"
@@ -450,6 +488,7 @@ export function ChartOfAccountsPage() {
                               <Pencil className="w-4 h-4" />
                             </button>
                             <button
+                              type="button"
                               onClick={() => toggleActive(account)}
                               disabled={togglingId === account.id}
                               className="p-2 rounded-lg text-slate-400 hover:text-[#c46040] hover:bg-slate-100 transition-colors disabled:opacity-50"
@@ -484,6 +523,7 @@ export function ChartOfAccountsPage() {
                 {editingAccount ? 'Edit Account' : 'Add New Account'}
               </h2>
               <button
+                type="button"
                 onClick={closeForm}
                 className="p-2 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition-colors"
                 aria-label="Close"
@@ -530,7 +570,7 @@ export function ChartOfAccountsPage() {
                   >
                     {ACCOUNT_TYPES.map((t) => (
                       <option key={t.value} value={t.value}>
-                        {t.label.slice(0, -1)}
+                        {singularType(t.value)}
                       </option>
                     ))}
                   </select>

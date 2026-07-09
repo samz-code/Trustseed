@@ -20,6 +20,8 @@ import {
   DollarSign,
   Phone,
   User,
+  UserCheck,
+  UserX,
   Banknote,
   PiggyBank,
   Receipt,
@@ -28,6 +30,7 @@ import {
   CreditCard,
   ChevronDown,
   Wallet as WalletIcon,
+  ShieldAlert,
 } from 'lucide-react';
 
 // ============================================================================
@@ -46,13 +49,19 @@ const TRANSACTION_TYPES: { value: TransactionType; label: string; icon: React.Re
   { value: 'loan_repayment', label: 'Loan Repayment', icon: <Banknote className="w-5 h-5" /> },
   { value: 'savings_deposit', label: 'Savings Deposit', icon: <PiggyBank className="w-5 h-5" /> },
   { value: 'savings_withdrawal', label: 'Savings Withdrawal', icon: <PiggyBank className="w-5 h-5" /> },
-  { value: 'float_allocation', label: 'Float Allocation', icon: <Receipt className="w-5 h-5" /> },
+  { value: 'float_allocation', label: 'Add Funds (Float)', icon: <Receipt className="w-5 h-5" /> },
 ];
 
 // The 6 quick-select cards shown in the modal, matching the reference layout.
 const QUICK_TYPES = TRANSACTION_TYPES.slice(0, 6);
 
-const CURRENCIES = ['KES', 'USD', 'SSP', 'UGX', 'TZS', 'EUR', 'GBP'];
+const CURRENCIES = ['KES', 'USD', 'SSP', 'UGX', 'TZS', 'RWF', 'EUR', 'GBP'];
+
+// Flat transfer fee rate, applied to every money-transfer transaction
+// (local AND international, per product decision). Deducted from the
+// sender's amount, so the recipient receives amount - fee. Kept as a
+// named constant so it's trivial to make tenant-configurable later.
+const TRANSFER_FEE_RATE = 0.05;
 
 // Real national flags rendered as inline SVG, clipped to a circle. National
 // flags are public-domain symbols, so no external assets or licensing needed,
@@ -124,6 +133,24 @@ function FlagGraphic({ code }: { code: string }) {
           <path d="M0 40 L40 0 v6 L6 40 Z" fill="#fcd116" />
           <path d="M0 40 L40 0 h-6 L0 34 Z" fill="#fcd116" />
           <path d="M0 34 L34 0 h-34 Z M40 6 L6 40 h34 Z" fill="#000" />
+        </>
+      );
+    case 'RWF': // Rwanda
+      return (
+        <>
+          <rect width="40" height="40" fill="#20603d" />
+          <rect width="40" height="26.67" fill="#00a1de" />
+          <rect y="20" width="40" height="6.67" fill="#fad201" />
+          <circle cx="31" cy="9" r="5" fill="#fad201" />
+          <circle cx="31" cy="9" r="4.3" fill="#00a1de" opacity="0.001" />
+          {Array.from({ length: 24 }).map((_, i) => {
+            const angle = (i * 15 * Math.PI) / 180;
+            const x1 = 31 + 4 * Math.sin(angle);
+            const y1 = 9 - 4 * Math.cos(angle);
+            const x2 = 31 + 5 * Math.sin(angle);
+            const y2 = 9 - 5 * Math.cos(angle);
+            return <line key={i} x1={x1} y1={y1} x2={x2} y2={y2} stroke="#e5be01" strokeWidth="0.6" />;
+          })}
         </>
       );
     case 'EUR': // European Union
@@ -235,6 +262,29 @@ function walletLabel(w: Wallet): string {
   return `${w.currency} ${w.wallet_type} — Bal: ${bal.toLocaleString(undefined, { minimumFractionDigits: 2 })}`;
 }
 
+// Strips everything but digits and keeps the last 9, so "+254712345678",
+// "0712345678", and "712345678" are all treated as the same subscriber
+// number regardless of how the country code was entered.
+function normalizePhone(phone: string | null | undefined): string {
+  if (!phone) return '';
+  const digitsOnly = phone.replace(/\D/g, '');
+  return digitsOnly.slice(-9);
+}
+
+// Masks a resolved recipient's name the way mobile-money confirmation
+// screens do (e.g. "JOHN K***A") so the sender can visually confirm it's
+// the right person without the full name being spoofable/typo-prone.
+function maskConfirmationName(name: string): string {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return name;
+  return parts
+    .map((part) => {
+      if (part.length <= 2) return part.toUpperCase();
+      return `${part[0]}${'*'.repeat(part.length - 2)}${part[part.length - 1]}`.toUpperCase();
+    })
+    .join(' ');
+}
+
 // ============================================================================
 // Supabase helpers
 // ============================================================================
@@ -251,8 +301,9 @@ async function fetchCustomerWallets(tenantId: string, customerId: string): Promi
 }
 
 // Float accounts live in their own `float_accounts` table (see FloatPage),
-// scoped to a branch. These are what the Forex "Branch Wallet Affected"
-// picker settles against.
+// scoped to a branch. This is the institution's central financial pool per
+// currency — every transaction type now settles against it (see
+// FLOAT_DEBIT_TYPES / FLOAT_CREDIT_TYPES below), not just Forex.
 async function fetchFloatAccounts(tenantId: string, branchId: string | null): Promise<FloatAccount[]> {
   let q = supabase
     .from('float_accounts')
@@ -310,7 +361,7 @@ function loanLabel(l: LoanAccount): string {
 }
 
 // ============================================================================
-// Reusable searchable select (Customer / Wallet / Loan pickers)
+// Reusable searchable select (Customer / Wallet / Loan / Float pickers)
 // ============================================================================
 
 interface SearchableOption {
@@ -446,6 +497,7 @@ const CURRENCY_NAMES: Record<string, string> = {
   SSP: 'South Sudanese Pound',
   UGX: 'Ugandan Shilling',
   TZS: 'Tanzanian Shilling',
+  RWF: 'Rwandan Franc',
   EUR: 'Euro',
   GBP: 'British Pound',
 };
@@ -627,6 +679,36 @@ function emptyFormData(defaultType?: TransactionType): TransactionFormData {
   };
 }
 
+// Transaction types that DRAW DOWN the branch float pool. Before these can
+// be submitted, the selected float account's balance must cover the amount
+// (plus fee, for transfers). This is the "verify available balance in the
+// wallet pool before crediting the receiving customer" rule.
+const FLOAT_DEBIT_TYPES: TransactionType[] = [
+  'withdrawal',
+  'transfer',
+  'forex_buy',
+  'forex_sell',
+  'loan_disbursement',
+  'savings_withdrawal',
+];
+
+// Transaction types that TOP UP the branch float pool. No balance check
+// needed, but the float account is still recorded for traceability.
+const FLOAT_CREDIT_TYPES: TransactionType[] = [
+  'deposit',
+  'savings_deposit',
+  'loan_repayment',
+  'float_allocation',
+];
+
+// Which currency's float account is actually affected by a given type. For
+// Forex, the institution pays OUT the "to_currency" leg, so that's the side
+// that must have sufficient balance (and the side that gets debited).
+function relevantFloatCurrency(type: TransactionType, formData: TransactionFormData): string {
+  if (type === 'forex_buy' || type === 'forex_sell') return formData.to_currency;
+  return formData.currency;
+}
+
 // ============================================================================
 // Main component
 // ============================================================================
@@ -707,16 +789,20 @@ export function TransactionsPage({ defaultType }: TransactionsPageProps = {}) {
       .finally(() => setLoadingFromWallets(false));
   }, [tenant, formData.from_customer_id]);
 
-  // Float accounts (forex only)
+  // Float / reserve accounts — loaded once per branch and reused across
+  // EVERY transaction type (deposit, withdrawal, transfer, forex, loans,
+  // savings, and manual float top-ups), not just Forex as before. This is
+  // the institution's central financial pool: every transaction settles
+  // against it so cash flow stays traceable and accurate.
   useEffect(() => {
-    if (!tenant || !['forex_buy', 'forex_sell'].includes(formData.transaction_type)) {
+    if (!tenant) {
       setFloatAccounts([]);
       return;
     }
     fetchFloatAccounts(tenant.id, branch?.id ?? null)
       .then(setFloatAccounts)
       .catch((err) => console.error('Error loading float accounts:', err));
-  }, [tenant, branch, formData.transaction_type]);
+  }, [tenant, branch]);
 
   // Loan accounts (loan disbursement only)
   useEffect(() => {
@@ -754,6 +840,89 @@ export function TransactionsPage({ defaultType }: TransactionsPageProps = {}) {
 
   const amountReceived = formData.exchange_rate > 0 ? formData.amount * formData.exchange_rate : 0;
 
+  // --- Automatic 5% transfer fee ---------------------------------------------
+  // Applies to every money-transfer transaction, local or international.
+  // Deducted from the sender's amount: the recipient receives amount - fee
+  // (converted at the exchange rate for cross-currency transfers).
+  const isTransferType = formData.transaction_type === 'transfer';
+  const transferFee = isTransferType ? Math.round(formData.amount * TRANSFER_FEE_RATE * 100) / 100 : 0;
+  const netPrincipalAfterFee = Math.max(formData.amount - transferFee, 0);
+  const transferRecipientReceives =
+    formData.exchange_rate > 0 && formData.currency !== formData.to_currency
+      ? netPrincipalAfterFee * formData.exchange_rate
+      : netPrincipalAfterFee;
+
+  // --- Float account resolution for whichever type is selected ---------------
+  const floatCurrency = useMemo(
+    () => relevantFloatCurrency(formData.transaction_type, formData),
+    [formData.transaction_type, formData.currency, formData.to_currency]
+  );
+
+  const floatAccountsForCurrency = useMemo(
+    () => floatAccounts.filter((f) => f.currency === floatCurrency),
+    [floatAccounts, floatCurrency]
+  );
+
+  const floatAccountOptions: SearchableOption[] = floatAccountsForCurrency.map((f) => ({
+    value: f.id,
+    label: floatLabel(f),
+  }));
+
+  const selectedFloatAccount = floatAccounts.find((f) => f.id === formData.float_account_id) || null;
+
+  // Auto-select the float account when there's exactly one match for the
+  // relevant currency, and clear a stale selection if the currency changed
+  // out from under it (e.g. user switched transaction currency).
+  useEffect(() => {
+    if (selectedFloatAccount && selectedFloatAccount.currency === floatCurrency) return;
+    if (floatAccountsForCurrency.length === 1) {
+      setFormData((prev) => ({ ...prev, float_account_id: floatAccountsForCurrency[0].id }));
+    } else {
+      setFormData((prev) => (prev.float_account_id ? { ...prev, float_account_id: '' } : prev));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [floatCurrency, floatAccountsForCurrency.length]);
+
+  // --- Phone-number recipient lookup for transfers (M-Pesa style) ------------
+  // As the sender types the recipient's phone number, we search the existing
+  // customer base (already loaded) for a match and auto-resolve their name,
+  // rather than requiring a customer to be picked from a list first.
+  const resolvedRecipient = useMemo(() => {
+    if (!isTransferType) return null;
+    const normalizedQuery = normalizePhone(formData.receiver_phone);
+    if (normalizedQuery.length < 7) return null;
+    return (
+      customers.find(
+        (c) => c.id !== formData.from_customer_id && normalizePhone(c.phone) === normalizedQuery
+      ) || null
+    );
+  }, [isTransferType, formData.receiver_phone, formData.from_customer_id, customers]);
+
+  const recipientLookupState: 'idle' | 'searching' | 'found' | 'not_found' = !isTransferType
+    ? 'idle'
+    : normalizePhone(formData.receiver_phone).length < 7
+    ? 'idle'
+    : resolvedRecipient
+    ? 'found'
+    : 'not_found';
+
+  // Keep to_customer_id / receiver_name in sync with whatever the phone
+  // lookup resolves, so the eventual insert always has a customer link when
+  // one exists (unregistered numbers still go through as external transfers).
+  useEffect(() => {
+    if (!isTransferType) return;
+    if (resolvedRecipient) {
+      setFormData((prev) =>
+        prev.to_customer_id === resolvedRecipient.id && prev.receiver_name === customerLabel(resolvedRecipient)
+          ? prev
+          : { ...prev, to_customer_id: resolvedRecipient.id, receiver_name: customerLabel(resolvedRecipient) }
+      );
+    } else {
+      setFormData((prev) => (prev.to_customer_id ? { ...prev, to_customer_id: '' } : prev));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resolvedRecipient, isTransferType]);
+
   const filteredTransactions = transactions.filter((tx) => {
     const q = searchQuery.toLowerCase();
     const matchesSearch =
@@ -778,9 +947,47 @@ export function TransactionsPage({ defaultType }: TransactionsPageProps = {}) {
       const isTransfer = type === 'transfer';
       const isForex = type === 'forex_buy' || type === 'forex_sell';
       const isLoan = type === 'loan_disbursement';
+      const isFloatTopUp = type === 'float_allocation';
 
       if (isLoan && !formData.loan_account_id) throw new Error('Select a loan account to disburse against');
-      if (isForex && !formData.float_account_id) throw new Error('Select the branch float account affected');
+
+      if (isTransfer && !formData.to_customer_id && !formData.receiver_name.trim()) {
+        throw new Error('No registered customer found for that phone number — enter the recipient\'s name to continue as an external transfer.');
+      }
+      if (isTransfer && !formData.receiver_phone.trim()) {
+        throw new Error('Recipient phone number is required.');
+      }
+
+      // --- Universal float / wallet-pool verification -------------------
+      // Every transaction now settles against the branch float pool. Debit
+      // types must have sufficient balance BEFORE we allow the transaction
+      // to be created; credit types just need a target float account on
+      // record for traceability.
+      const isDebit = FLOAT_DEBIT_TYPES.includes(type);
+      const isCredit = FLOAT_CREDIT_TYPES.includes(type);
+
+      if (!formData.float_account_id) {
+        throw new Error(
+          `Select the ${floatCurrency} float/reserve account this transaction ${isDebit ? 'draws from' : 'credits'}.`
+        );
+      }
+      const floatAccount = floatAccounts.find((f) => f.id === formData.float_account_id);
+      if (!floatAccount) throw new Error('Selected float account could not be found. Please refresh and try again.');
+
+      if (isDebit) {
+        const feeComponent = isTransfer ? transferFee : 0;
+        const requiredAmount = isForex ? amountReceived : formData.amount + feeComponent;
+        const availableBalance = Number(floatAccount.balance ?? 0);
+        if (requiredAmount > availableBalance) {
+          throw new Error(
+            `Insufficient float balance. Available: ${floatAccount.currency} ${availableBalance.toLocaleString(undefined, {
+              minimumFractionDigits: 2,
+            })}, required: ${floatAccount.currency} ${requiredAmount.toLocaleString(undefined, {
+              minimumFractionDigits: 2,
+            })}.`
+          );
+        }
+      }
 
       const requiredRole = resolveRequiredRole(formData.amount, formData.is_international);
       const requiresApproval = requiredRole !== null;
@@ -789,8 +996,8 @@ export function TransactionsPage({ defaultType }: TransactionsPageProps = {}) {
       const approvalLevel = requiredRole === 'compliance_officer' ? 2 : requiresApproval ? 1 : 0;
 
       // Resolve which wallet ids get written, per type. Note the branch float
-      // account is NOT a wallet (separate `float_accounts` table), so it goes
-      // in its own column rather than to_wallet_id (which FKs to wallets).
+      // account is NOT a customer wallet (separate `float_accounts` table);
+      // it is always written to `float_account_id` regardless of type.
       let fromWalletId: string | null = formData.from_wallet_id || null;
       let toWalletId: string | null = formData.to_wallet_id || null;
       if (isForex) {
@@ -801,6 +1008,12 @@ export function TransactionsPage({ defaultType }: TransactionsPageProps = {}) {
         fromWalletId = null;
         toWalletId = formData.from_wallet_id || null; // disbursement wallet
       }
+      if (isFloatTopUp) {
+        fromWalletId = null;
+        toWalletId = null;
+      }
+
+      const feeAmount = isTransfer ? transferFee : 0;
 
       const { data: insertedTx, error: insertError } = await supabase
         .from('transactions')
@@ -811,23 +1024,24 @@ export function TransactionsPage({ defaultType }: TransactionsPageProps = {}) {
           amount: formData.amount,
           currency: formData.currency,
           to_currency: isTransfer || isForex ? formData.to_currency : null,
-          fee_amount: isTransfer && formData.is_international ? formData.charges || 0 : 0,
-          fee_currency: isTransfer && formData.is_international ? formData.currency : null,
-          charges: isTransfer && formData.is_international ? formData.charges || 0 : null,
-          from_customer_id: formData.from_customer_id || null,
+          fee_amount: feeAmount,
+          fee_currency: isTransfer ? formData.currency : null,
+          charges: isTransfer ? feeAmount : null,
+          from_customer_id: isFloatTopUp ? null : formData.from_customer_id || null,
           to_customer_id: isTransfer ? formData.to_customer_id || null : null,
           from_wallet_id: fromWalletId,
           to_wallet_id: toWalletId,
           sender_name: formData.sender_name || null,
           sender_phone: formData.sender_phone || null,
-          receiver_name: formData.receiver_name || null,
-          receiver_phone: formData.receiver_phone || null,
+          receiver_name: isTransfer ? formData.receiver_name || null : null,
+          receiver_phone: isTransfer ? formData.receiver_phone || null : null,
           destination_country: isTransfer ? formData.destination_country || null : null,
           is_international: isTransfer ? formData.is_international : false,
           requires_compliance_check: isTransfer ? formData.is_international : false,
-          payment_source: type === 'deposit' || type === 'withdrawal' ? formData.payment_source || null : null,
+          payment_source:
+            type === 'deposit' || type === 'withdrawal' || isFloatTopUp ? formData.payment_source || null : null,
           exchange_rate: isTransfer || isForex ? formData.exchange_rate || null : null,
-          float_account_id: isForex ? formData.float_account_id || null : null,
+          float_account_id: formData.float_account_id,
           loan_account_id: isLoan ? formData.loan_account_id || null : null,
           approval_reference: isLoan ? formData.approval_reference || null : null,
           purpose: formData.purpose || null,
@@ -935,13 +1149,12 @@ export function TransactionsPage({ defaultType }: TransactionsPageProps = {}) {
       customers.map((c) => ({
         value: c.id,
         label: customerLabel(c),
-        sublabel: c.customer_type === 'individual' ? 'Individual' : c.customer_type === 'business' ? 'Business' : 'Organization',
+        sublabel: `${c.customer_type === 'individual' ? 'Individual' : c.customer_type === 'business' ? 'Business' : 'Organization'} · ${c.phone}`,
       })),
     [customers]
   );
 
   const fromWalletOptions: SearchableOption[] = fromWallets.map((w) => ({ value: w.id, label: walletLabel(w) }));
-  const floatAccountOptions: SearchableOption[] = floatAccounts.map((f) => ({ value: f.id, label: floatLabel(f) }));
   const loanAccountOptions: SearchableOption[] = loanAccounts.map((l) => ({
     value: l.id,
     label: loanLabel(l),
@@ -956,6 +1169,35 @@ export function TransactionsPage({ defaultType }: TransactionsPageProps = {}) {
   const setRate = (v: number) => {
     setRateManuallyEdited(true);
     setFormData((prev) => ({ ...prev, exchange_rate: v }));
+  };
+
+  // Shared float-account field, rendered for every transaction type so the
+  // branch's central pool is always the source of truth for the movement.
+  const renderFloatField = (labelOverride?: string) => {
+    const isDebit = FLOAT_DEBIT_TYPES.includes(formData.transaction_type);
+    return (
+      <Field
+        label={labelOverride || `${isDebit ? 'Float Account Debited' : 'Float Account Credited'} (${floatCurrency})`}
+        required
+        hint={
+          floatAccountOptions.length === 0
+            ? `No active ${floatCurrency} float account found for this branch. Create one on the Float page first.`
+            : selectedFloatAccount
+            ? `Current balance: ${selectedFloatAccount.currency} ${Number(selectedFloatAccount.balance ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}`
+            : undefined
+        }
+        hintTone={floatAccountOptions.length === 0 ? 'warn' : 'info'}
+      >
+        <SearchableSelect
+          value={formData.float_account_id}
+          onChange={(v) => setFormData((prev) => ({ ...prev, float_account_id: v }))}
+          options={floatAccountOptions}
+          placeholder={floatAccountOptions.length ? 'Select float account...' : 'No float accounts found'}
+          disabled={floatAccountOptions.length === 0}
+          disabledHint="No matching float accounts"
+        />
+      </Field>
+    );
   };
 
   // --- Dynamic "Section 2" fields, one branch per transaction type -----------
@@ -998,6 +1240,7 @@ export function TransactionsPage({ defaultType }: TransactionsPageProps = {}) {
             <Field label="Amount" required hint={approvalHint}>
               <AmountInput value={formData.amount} onChange={(v) => setFormData((prev) => ({ ...prev, amount: v }))} />
             </Field>
+            {renderFloatField()}
             <Field label={isDeposit ? 'Payment Source' : 'Payout Method'} required>
               <PaymentSourcePicker
                 value={formData.payment_source}
@@ -1011,24 +1254,61 @@ export function TransactionsPage({ defaultType }: TransactionsPageProps = {}) {
       case 'transfer':
         return (
           <>
-            <div className="grid sm:grid-cols-2 gap-4">
-              <Field label="From Customer / Sender" required>
-                <SearchableSelect
-                  value={formData.from_customer_id}
-                  onChange={(v) => setFormData((prev) => ({ ...prev, from_customer_id: v, from_wallet_id: '' }))}
-                  options={customerOptions}
-                  placeholder="Search sender..."
+            <Field label="From Customer / Sender" required>
+              <SearchableSelect
+                value={formData.from_customer_id}
+                onChange={(v) => setFormData((prev) => ({ ...prev, from_customer_id: v, from_wallet_id: '' }))}
+                options={customerOptions}
+                placeholder="Search sender..."
+              />
+            </Field>
+
+            {/* M-Pesa-style recipient resolution: type the phone number, the
+                system looks up the registered customer and confirms the
+                name before the sender proceeds. */}
+            <Field label="Recipient Phone Number" required>
+              <div className="relative">
+                <Phone className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400" />
+                <input
+                  type="tel"
+                  value={formData.receiver_phone}
+                  onChange={(e) => setFormData((prev) => ({ ...prev, receiver_phone: e.target.value }))}
+                  placeholder="e.g. 0712345678"
+                  className="w-full pl-10 pr-10 py-2.5 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#1ebcb2] focus:border-transparent"
+                />
+                {recipientLookupState === 'found' && (
+                  <UserCheck className="absolute right-3 top-1/2 -translate-y-1/2 w-5 h-5 text-[#1ebcb2]" />
+                )}
+                {recipientLookupState === 'not_found' && (
+                  <UserX className="absolute right-3 top-1/2 -translate-y-1/2 w-5 h-5 text-[#ee7b22]" />
+                )}
+              </div>
+              {recipientLookupState === 'found' && resolvedRecipient && (
+                <p className="text-xs mt-1.5 flex items-center gap-1.5 text-[#1ebcb2] font-medium">
+                  <CheckCircle className="w-3.5 h-3.5" />
+                  Confirmed: {maskConfirmationName(customerLabel(resolvedRecipient))}
+                </p>
+              )}
+              {recipientLookupState === 'not_found' && (
+                <p className="text-xs mt-1.5 flex items-center gap-1.5 text-[#ee7b22]">
+                  <ShieldAlert className="w-3.5 h-3.5" />
+                  No registered customer with this number — enter their name below to send as an external transfer.
+                </p>
+              )}
+            </Field>
+
+            {recipientLookupState === 'not_found' && (
+              <Field label="Recipient Name (unregistered)" required>
+                <input
+                  type="text"
+                  value={formData.receiver_name}
+                  onChange={(e) => setFormData((prev) => ({ ...prev, receiver_name: e.target.value }))}
+                  placeholder="Full name of recipient"
+                  className="w-full px-4 py-2.5 border border-[#ee7b22]/50 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#ee7b22] focus:border-transparent"
                 />
               </Field>
-              <Field label="To Customer / Receiver" required>
-                <SearchableSelect
-                  value={formData.to_customer_id}
-                  onChange={(v) => setFormData((prev) => ({ ...prev, to_customer_id: v, to_wallet_id: '' }))}
-                  options={customerOptions}
-                  placeholder="Search receiver..."
-                />
-              </Field>
-            </div>
+            )}
+
             <div className="grid sm:grid-cols-2 gap-4">
               <Field label="Sending Currency">
                 <CurrencySelect value={formData.currency} onChange={(v) => { setRateManuallyEdited(false); setFormData((prev) => ({ ...prev, currency: v })); }} />
@@ -1041,16 +1321,44 @@ export function TransactionsPage({ defaultType }: TransactionsPageProps = {}) {
               <Field label="Receiving Currency">
                 <CurrencySelect value={formData.to_currency} onChange={(v) => { setRateManuallyEdited(false); setFormData((prev) => ({ ...prev, to_currency: v })); }} />
               </Field>
-              <Field label="Exchange Rate">
-                <AmountInput value={formData.exchange_rate} onChange={setRate} step="0.0001" icon={<RefreshCcw className="w-4 h-4" />} />
+              <Field label="Exchange Rate" hint={formData.currency === formData.to_currency ? 'Same currency — rate not needed' : undefined} hintTone="info">
+                <AmountInput
+                  value={formData.currency === formData.to_currency ? 1 : formData.exchange_rate}
+                  onChange={setRate}
+                  step="0.0001"
+                  icon={<RefreshCcw className="w-4 h-4" />}
+                  readOnly={formData.currency === formData.to_currency}
+                />
               </Field>
             </div>
-            {formData.exchange_rate > 0 && formData.currency !== formData.to_currency && (
-              <p className="text-xs text-slate-500 -mt-2">
-                1 {formData.currency} = {formData.exchange_rate.toLocaleString(undefined, { maximumFractionDigits: 4 })} {formData.to_currency} · Receiver gets{' '}
-                {formData.to_currency} {amountReceived.toLocaleString(undefined, { minimumFractionDigits: 2 })}
-              </p>
+
+            {/* Automatic 5% fee breakdown — always shown for transfers,
+                local or international, before the sender can confirm. */}
+            {formData.amount > 0 && (
+              <div className="p-3.5 bg-[#1ebcb2]/5 border border-[#1ebcb2]/20 rounded-lg text-sm space-y-1.5">
+                <div className="flex items-center justify-between text-slate-600">
+                  <span>Amount Sent</span>
+                  <span className="font-medium text-slate-800">
+                    {formData.currency} {formData.amount.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between text-slate-600">
+                  <span>Transfer Fee ({(TRANSFER_FEE_RATE * 100).toFixed(0)}%)</span>
+                  <span className="font-medium text-[#ee7b22]">
+                    − {formData.currency} {transferFee.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between pt-1.5 border-t border-[#1ebcb2]/20">
+                  <span className="font-semibold text-slate-800">Recipient Receives</span>
+                  <span className="font-semibold text-[#1ebcb2]">
+                    {formData.to_currency} {transferRecipientReceives.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                  </span>
+                </div>
+              </div>
             )}
+
+            {renderFloatField(`Float Account Debited (${floatCurrency})`)}
+
             <div>
               <label className="block text-sm font-medium text-slate-700 mb-2">Transfer Type</label>
               <div className="flex flex-col sm:flex-row sm:items-center gap-3 sm:gap-6">
@@ -1059,7 +1367,7 @@ export function TransactionsPage({ defaultType }: TransactionsPageProps = {}) {
                     type="radio"
                     name="transfer_type"
                     checked={!formData.is_international}
-                    onChange={() => setFormData((prev) => ({ ...prev, is_international: false, charges: 0, destination_country: '' }))}
+                    onChange={() => setFormData((prev) => ({ ...prev, is_international: false, destination_country: '' }))}
                     className="text-[#641f60] focus:ring-[#1ebcb2]"
                   />
                   Local Transfer
@@ -1075,8 +1383,11 @@ export function TransactionsPage({ defaultType }: TransactionsPageProps = {}) {
                   International Transfer
                 </label>
               </div>
+              <p className="text-xs text-slate-400 mt-1.5">
+                International transfers always route to Compliance for sign-off. The 5% fee applies either way.
+              </p>
               {formData.is_international && (
-                <div className="grid sm:grid-cols-2 gap-4 mt-4">
+                <div className="mt-4">
                   <Field label="Destination Country">
                     <input
                       type="text"
@@ -1085,9 +1396,6 @@ export function TransactionsPage({ defaultType }: TransactionsPageProps = {}) {
                       placeholder="e.g. South Sudan"
                       className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#1ebcb2] focus:border-transparent"
                     />
-                  </Field>
-                  <Field label="Charges / Commission" hint="Requires Compliance Officer approval (international transfer)">
-                    <AmountInput value={formData.charges} onChange={(v) => setFormData((prev) => ({ ...prev, charges: v }))} />
                   </Field>
                 </div>
               )}
@@ -1138,16 +1446,7 @@ export function TransactionsPage({ defaultType }: TransactionsPageProps = {}) {
               <Field label={receivesAmountLabel}>
                 <AmountInput value={amountReceived} readOnly />
               </Field>
-              <Field label="Branch Float Affected" required>
-                <SearchableSelect
-                  value={formData.float_account_id}
-                  onChange={(v) => setFormData((prev) => ({ ...prev, float_account_id: v }))}
-                  options={floatAccountOptions}
-                  placeholder={floatAccountOptions.length ? 'Select float account...' : 'No float accounts found'}
-                  disabled={floatAccountOptions.length === 0}
-                  disabledHint="No branch float accounts"
-                />
-              </Field>
+              {renderFloatField(`Branch Float Affected (${floatCurrency})`)}
             </div>
           </>
         );
@@ -1207,11 +1506,44 @@ export function TransactionsPage({ defaultType }: TransactionsPageProps = {}) {
                 />
               </Field>
             </div>
+            {renderFloatField()}
+          </>
+        );
+
+      case 'float_allocation':
+        return (
+          <>
+            <div className="p-3.5 bg-[#641f60]/5 border border-[#641f60]/20 rounded-lg text-sm text-slate-600 flex items-start gap-2.5">
+              <WalletIcon className="w-5 h-5 text-[#641f60] flex-shrink-0 mt-0.5" />
+              <span>
+                Use this to record capital injected into the business float — cash, bank, or mobile-money funds
+                deposited into your operating pool. No customer is involved; this only increases a float account's
+                available balance.
+              </span>
+            </div>
+            <div className="grid sm:grid-cols-2 gap-4">
+              <Field label="Currency" required>
+                <CurrencySelect
+                  value={formData.currency}
+                  onChange={(v) => setFormData((prev) => ({ ...prev, currency: v, float_account_id: '' }))}
+                />
+              </Field>
+              <Field label="Amount" required>
+                <AmountInput value={formData.amount} onChange={(v) => setFormData((prev) => ({ ...prev, amount: v }))} />
+              </Field>
+            </div>
+            {renderFloatField('Float Account Credited')}
+            <Field label="Funding Source" required>
+              <PaymentSourcePicker
+                value={formData.payment_source}
+                onChange={(v) => setFormData((prev) => ({ ...prev, payment_source: v }))}
+              />
+            </Field>
           </>
         );
 
       default:
-        // savings_deposit / savings_withdrawal / loan_repayment / float_allocation
+        // savings_deposit / savings_withdrawal / loan_repayment
         return (
           <>
             <Field label="Customer" required>
@@ -1243,6 +1575,7 @@ export function TransactionsPage({ defaultType }: TransactionsPageProps = {}) {
             <Field label="Amount" required hint={approvalHint}>
               <AmountInput value={formData.amount} onChange={(v) => setFormData((prev) => ({ ...prev, amount: v }))} />
             </Field>
+            {renderFloatField()}
             <Field label="Payment Source">
               <PaymentSourcePicker value={formData.payment_source} onChange={(v) => setFormData((prev) => ({ ...prev, payment_source: v }))} />
             </Field>
@@ -1252,7 +1585,10 @@ export function TransactionsPage({ defaultType }: TransactionsPageProps = {}) {
   };
 
   const activeQuickType = QUICK_TYPES.find((t) => t.value === formData.transaction_type);
-  const showExternalParty = formData.transaction_type === 'transfer' || formData.transaction_type === 'withdrawal';
+  // Only Withdrawal still uses the free-text "External Party" block for
+  // supplementary sender info — Transfer now captures recipient details
+  // inline (phone lookup) as part of Section 2 above.
+  const showExternalParty = formData.transaction_type === 'withdrawal';
 
   // ============================================================================
   // Render
@@ -1376,6 +1712,11 @@ export function TransactionsPage({ defaultType }: TransactionsPageProps = {}) {
                       {tx.transaction_type.includes('deposit') || tx.transaction_type.includes('repayment') ? '+' : '-'}
                       {tx.currency} {tx.amount.toLocaleString(undefined, { minimumFractionDigits: 2 })}
                     </p>
+                    {tx.fee_amount ? (
+                      <p className="text-xs text-[#ee7b22]">
+                        Fee: {tx.fee_currency || tx.currency} {Number(tx.fee_amount).toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                      </p>
+                    ) : null}
                     <p className="text-xs text-slate-500">{new Date(tx.created_at).toLocaleString()}</p>
                   </div>
                 </div>
@@ -1444,6 +1785,19 @@ export function TransactionsPage({ defaultType }: TransactionsPageProps = {}) {
                     </button>
                   ))}
                 </div>
+                <div className="mt-2">
+                  <select
+                    value={TRANSACTION_TYPES.some((t) => t.value === formData.transaction_type) ? formData.transaction_type : ''}
+                    onChange={(e) => setType(e.target.value as TransactionType)}
+                    className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg text-slate-600 focus:outline-none focus:ring-2 focus:ring-[#1ebcb2]"
+                  >
+                    {TRANSACTION_TYPES.map((t) => (
+                      <option key={t.value} value={t.value}>
+                        {t.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
               </div>
 
               {/* Section 2: dynamic fields */}
@@ -1455,7 +1809,7 @@ export function TransactionsPage({ defaultType }: TransactionsPageProps = {}) {
                 {renderTypeFields()}
               </div>
 
-              {/* External Party (transfer / withdrawal) */}
+              {/* External Party (withdrawal only — transfer captures this inline above) */}
               {showExternalParty && (
                 <div className="border-t border-slate-200 pt-4 space-y-4">
                   <h3 className="font-semibold text-slate-900 flex items-center gap-2">

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { supabase } from '../lib/supabase';
@@ -30,6 +30,7 @@ import {
   Loader2,
   AlertCircle,
   RefreshCw,
+  BarChart3,
 } from 'lucide-react';
 
 interface DashboardLayoutProps {
@@ -146,6 +147,10 @@ const navigationItems: NavItem[] = [
     path: 'settings',
   },
 ];
+
+// Head-office-only navigation. Branch users never see these entries; the pages
+// themselves also gate access, so this is defense-in-depth for the menu.
+const HEAD_OFFICE_ROLES = new Set(['super_admin', 'institution_admin', 'head_office_admin']);
 
 function timeAgo(iso: string): string {
   const diffMs = Date.now() - new Date(iso).getTime();
@@ -482,6 +487,22 @@ export function DashboardLayout({ children }: DashboardLayoutProps) {
 
   const unreadCount = notifications.filter((n) => !n.read_at).length;
 
+  // Branch users see only their branch's menu; head office gets the extra
+  // Branch Performance comparison view (inserted right after Reports).
+  const navItems = useMemo(() => {
+    const items = [...navigationItems];
+    if (HEAD_OFFICE_ROLES.has(admin?.role ?? '')) {
+      const bp: NavItem = {
+        label: 'Branch Performance',
+        icon: <BarChart3 className="w-5 h-5" />,
+        path: 'branch-performance',
+      };
+      const idx = items.findIndex((i) => i.path === 'reports');
+      items.splice(idx >= 0 ? idx + 1 : items.length, 0, bp);
+    }
+    return items;
+  }, [admin?.role]);
+
   // Fetch notifications for this tenant that are either tenant-wide
   // (admin_id IS NULL — e.g. the approval notices inserted from
   // TransactionsPage) or addressed specifically to this admin. If you still
@@ -512,7 +533,7 @@ export function DashboardLayout({ children }: DashboardLayoutProps) {
       const message = err instanceof Error ? err.message : 'Failed to load notifications';
       // Surface a clearer hint for the most common setup issue.
       if (/relation .* does not exist/i.test(message) || (err as { code?: string })?.code === '42P01') {
-        setNotifError('The notifications table doesn\u2019t exist yet in your database.');
+        setNotifError('The notifications table doesn’t exist yet in your database.');
       } else {
         setNotifError(message);
       }
@@ -687,9 +708,7 @@ export function DashboardLayout({ children }: DashboardLayoutProps) {
         }`}
       >
         <div className="flex items-center justify-between p-4 border-b border-white/20">
-          <div className="min-w-0 flex-1">
-         
-          </div>
+          <div className="min-w-0 flex-1" />
           <button
             onClick={() => setSidebarOpen(false)}
             className="lg:hidden p-1 rounded-lg hover:bg-white/10 transition-colors flex-shrink-0"
@@ -701,7 +720,7 @@ export function DashboardLayout({ children }: DashboardLayoutProps) {
 
         <nav className="p-3 overflow-y-auto h-[calc(100%-160px)]">
           <ul className="space-y-1">
-            {navigationItems.map((item) => (
+            {navItems.map((item) => (
               <li key={item.label}>
                 {item.children ? (
                   <>
@@ -968,19 +987,19 @@ export function DashboardLayout({ children }: DashboardLayoutProps) {
       {/* Edit Profile modal */}
       {showProfile && (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-stretch sm:items-center justify-center p-0 sm:p-6">
-          <div className="relative bg-white w-full sm:max-w-2xl md:max-w-3xl sm:rounded-3xl shadow-2xl flex flex-col h-full sm:h-auto sm:max-h-[92vh] overflow-hidden ring-1 ring-black/5 animate-[fadeIn_0.15s_ease-out]">
-            {/* Decorative brand gradient band */}
-            <div className="h-1.5 w-full bg-gradient-to-r from-[#641f60] via-[#ee7b22] to-[#1ebcb2] flex-shrink-0" />
+          <div className="relative bg-white w-full sm:max-w-2xl md:max-w-3xl sm:rounded-3xl shadow-2xl flex flex-col h-full sm:h-auto sm:max-h-[92vh] overflow-hidden ring-1 ring-black/5">
+            {/* Brand accent band (solid) */}
+            <div className="h-1.5 w-full bg-[#641f60] flex-shrink-0" />
 
             {/* Fixed header */}
-            <div className="px-6 sm:px-8 py-5 border-b border-[#dcdfe0] flex items-center justify-between flex-shrink-0 bg-gradient-to-r from-[#641f60]/5 via-white to-[#1ebcb2]/5">
+            <div className="px-6 sm:px-8 py-5 border-b border-[#dcdfe0] flex items-center justify-between flex-shrink-0 bg-white">
               <div>
                 <h2 className="text-xl sm:text-2xl font-bold text-[#641f60]">Edit Profile</h2>
                 <p className="text-sm text-slate-500 mt-0.5">Update your details and pick a look you like</p>
               </div>
               <button
                 onClick={closeProfile}
-                className="p-2.5 rounded-xl text-slate-400 hover:text-white hover:bg-[#641f60] hover:rotate-90 transition-all duration-300"
+                className="p-2.5 rounded-xl text-slate-400 hover:text-white hover:bg-[#641f60] transition-all duration-200"
                 aria-label="Close"
               >
                 <X className="w-5 h-5" />
@@ -997,7 +1016,6 @@ export function DashboardLayout({ children }: DashboardLayoutProps) {
                 {/* Avatar is auto-generated — user picks a style and can shuffle looks */}
                 <div className="flex flex-col items-center gap-4 md:pr-8 md:border-r md:border-[#dcdfe0]">
                   <div className="relative group cursor-pointer" onClick={shuffleAvatar}>
-                    <div className="absolute -inset-2 rounded-full bg-gradient-to-br from-[#ee7b22] via-[#641f60] to-[#1ebcb2] opacity-0 group-hover:opacity-100 blur-md transition-opacity duration-300" />
                     <div className="relative ring-4 ring-[#dcdfe0] group-hover:ring-[#8dd3cd] rounded-full transition-all duration-300 group-hover:scale-105 group-hover:shadow-xl">
                       <Avatar
                         name={profileForm.full_name || displayName}
@@ -1118,7 +1136,7 @@ export function DashboardLayout({ children }: DashboardLayoutProps) {
                 type="submit"
                 form="edit-profile-form"
                 disabled={profileSubmitting}
-                className="px-7 py-3 bg-[#ee7b22] hover:bg-[#641f60] text-white font-semibold rounded-xl shadow-lg shadow-[#ee7b22]/30 hover:shadow-xl hover:shadow-[#641f60]/40 hover:-translate-y-0.5 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:translate-y-0 flex items-center justify-center gap-2 transition-all duration-200"
+                className="px-7 py-3 bg-[#ee7b22] hover:bg-[#641f60] text-white font-semibold rounded-xl shadow-lg hover:shadow-xl hover:-translate-y-0.5 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:translate-y-0 flex items-center justify-center gap-2 transition-all duration-200"
               >
                 {profileSubmitting ? (
                   <>
