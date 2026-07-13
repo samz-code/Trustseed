@@ -1,7 +1,8 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { supabase } from '../lib/supabase';
 import type { FloatAccount } from '../types';
+import type { Tables } from '../lib/supabase';
 import {
   Receipt,
   DollarSign,
@@ -22,14 +23,28 @@ import {
   Lock,
   Shield,
   Coins,
+  Wallet,
+  CheckCircle,
+  ArrowDownRight,
+  ArrowUpRight,
+  ArrowRightLeft,
+  Globe,
+  Clock,
+  XCircle,
+  History,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
+
+// Transaction row shape as stored on `transactions` — using the generated
+// Supabase type directly (rather than a hand-rolled interface) so this stays
+// correct if the schema changes.
+type LedgerTransaction = Tables<'transactions'>;
 
 // ============================================================================
 // Currency flags (shared visual language with TransactionsPage)
 // ============================================================================
 
-const CURRENCIES = ['KES', 'USD', 'SSP', 'UGX', 'TZS', 'EUR', 'GBP'];
+const CURRENCIES = ['KES', 'USD', 'SSP', 'UGX', 'TZS', 'RWF', 'EUR', 'GBP'];
 
 const CURRENCY_NAMES: Record<string, string> = {
   USD: 'US Dollar',
@@ -37,6 +52,7 @@ const CURRENCY_NAMES: Record<string, string> = {
   SSP: 'South Sudanese Pound',
   UGX: 'Ugandan Shilling',
   TZS: 'Tanzanian Shilling',
+  RWF: 'Rwandan Franc',
   EUR: 'Euro',
   GBP: 'British Pound',
 };
@@ -109,6 +125,23 @@ function FlagGraphic({ code }: { code: string }) {
           <path d="M0 40 L40 0 v6 L6 40 Z" fill="#fcd116" />
           <path d="M0 40 L40 0 h-6 L0 34 Z" fill="#fcd116" />
           <path d="M0 34 L34 0 h-34 Z M40 6 L6 40 h34 Z" fill="#000" />
+        </>
+      );
+    case 'RWF': // Rwanda
+      return (
+        <>
+          <rect width="40" height="40" fill="#20603d" />
+          <rect width="40" height="26.67" fill="#00a1de" />
+          <rect y="20" width="40" height="6.67" fill="#fad201" />
+          <circle cx="31" cy="9" r="5" fill="#fad201" />
+          {Array.from({ length: 24 }).map((_, i) => {
+            const angle = (i * 15 * Math.PI) / 180;
+            const x1 = 31 + 4 * Math.sin(angle);
+            const y1 = 9 - 4 * Math.cos(angle);
+            const x2 = 31 + 5 * Math.sin(angle);
+            const y2 = 9 - 5 * Math.cos(angle);
+            return <line key={i} x1={x1} y1={y1} x2={x2} y2={y2} stroke="#e5be01" strokeWidth="0.6" />;
+          })}
         </>
       );
     case 'EUR': // European Union
@@ -248,6 +281,17 @@ const FLOAT_TYPES: { value: string; label: string; Icon: LucideIcon }[] = [
 
 const STATUS_OPTIONS: FloatAccount['status'][] = ['active', 'inactive', 'frozen'];
 
+// Funding sources for a tracked top-up — mirrors the payment-source options
+// used on the "Add Funds (Float)" transaction type in Transactions, so a
+// capital injection looks the same regardless of where it was started.
+type FundingSource = 'cash' | 'momo' | 'mpesa' | 'bank';
+const FUNDING_SOURCES: { value: FundingSource; label: string; Icon: LucideIcon }[] = [
+  { value: 'cash', label: 'Cash', Icon: Banknote },
+  { value: 'momo', label: 'MoMo', Icon: Smartphone },
+  { value: 'mpesa', label: 'M-Pesa', Icon: Smartphone },
+  { value: 'bank', label: 'Bank', Icon: Landmark },
+];
+
 function getFloatIcon(type: string): LucideIcon {
   return FLOAT_TYPES.find((t) => t.value === type)?.Icon || Coins;
 }
@@ -278,7 +322,77 @@ function statusBadgeStyle(status: string) {
 }
 
 // ============================================================================
-// Form data
+// Float account activity ledger — resolves which customers' transactions
+// actually moved through a given float account, so Float isn't just a
+// balance number in isolation.
+// ============================================================================
+
+// Same debit/credit classification TransactionsPage uses for float
+// verification, kept local here purely for the +/- display sign.
+const FLOAT_DEBIT_TX_TYPES = new Set([
+  'withdrawal',
+  'transfer',
+  'forex_buy',
+  'forex_sell',
+  'loan_disbursement',
+  'savings_withdrawal',
+]);
+
+function isDebitTx(type: string): boolean {
+  return FLOAT_DEBIT_TX_TYPES.has(type);
+}
+
+function ledgerTxIcon(type: string) {
+  if (type.includes('deposit') || type.includes('repayment')) return ArrowDownRight;
+  if (type.includes('withdrawal') || type.includes('disbursement')) return ArrowUpRight;
+  if (type.includes('forex')) return Globe;
+  if (type === 'float_allocation') return Wallet;
+  return ArrowRightLeft;
+}
+
+function ledgerTxIconClasses(type: string): { bg: string; color: string } {
+  if (type.includes('deposit') || type.includes('repayment')) return { bg: 'bg-[#1ebcb2]/10', color: 'text-[#1ebcb2]' };
+  if (type.includes('withdrawal') || type.includes('disbursement')) return { bg: 'bg-[#ee7b22]/10', color: 'text-[#ee7b22]' };
+  if (type.includes('forex')) return { bg: 'bg-[#641f60]/10', color: 'text-[#641f60]' };
+  return { bg: 'bg-slate-100', color: 'text-slate-500' };
+}
+
+// Prefers the transaction's own stored sender/receiver name (set at the
+// point of entry, e.g. via phone lookup on a transfer); falls back to a
+// resolved customer record for types that only stored a customer id
+// (deposits, withdrawals, loan movements, forex).
+function ledgerCustomerLabel(t: LedgerTransaction, customerNames: Record<string, string>): string {
+  if (t.sender_name && t.receiver_name) return `${t.sender_name} \u2192 ${t.receiver_name}`;
+  if (t.sender_name) return t.sender_name;
+  if (t.receiver_name) return t.receiver_name;
+  const fromName = t.from_customer_id ? customerNames[t.from_customer_id] : undefined;
+  const toName = t.to_customer_id ? customerNames[t.to_customer_id] : undefined;
+  if (fromName && toName) return `${fromName} \u2192 ${toName}`;
+  if (fromName) return fromName;
+  if (toName) return toName;
+  return t.transaction_type === 'float_allocation' ? 'Capital injection (no customer)' : 'No customer linked';
+}
+
+function ledgerStatusBadge(status: string) {
+  const map: Record<string, { cls: string; Icon: LucideIcon }> = {
+    pending: { cls: 'bg-[#ee7b22]/10 text-[#ee7b22]', Icon: Clock },
+    approved: { cls: 'bg-[#1ebcb2]/10 text-[#1ebcb2]', Icon: CheckCircle },
+    processing: { cls: 'bg-[#641f60]/10 text-[#641f60]', Icon: Loader2 },
+    completed: { cls: 'bg-[#1ebcb2]/10 text-[#1ebcb2]', Icon: CheckCircle },
+    failed: { cls: 'bg-[#c46040]/10 text-[#c46040]', Icon: XCircle },
+    reversed: { cls: 'bg-slate-100 text-slate-600', Icon: RefreshCcw },
+    cancelled: { cls: 'bg-slate-100 text-slate-600', Icon: XCircle },
+  };
+  const s = map[status] || map.pending;
+  return (
+    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium capitalize ${s.cls}`}>
+      <s.Icon className="w-3 h-3" />
+      {status}
+    </span>
+  );
+}
+
+
 // ============================================================================
 
 interface FloatFormData {
@@ -313,6 +427,16 @@ function accountToFormData(a: FloatAccount): FloatFormData {
     status: a.status,
     scope: a.branch_id ? 'branch' : 'tenant_wide',
   };
+}
+
+interface TopUpForm {
+  amount: string;
+  source: FundingSource;
+  notes: string;
+}
+
+function emptyTopUpForm(): TopUpForm {
+  return { amount: '', source: 'cash', notes: '' };
 }
 
 // ============================================================================
@@ -352,7 +476,7 @@ function StatPill({ label, value }: { label: string; value: string | number }) {
 // ============================================================================
 
 export function FloatPage() {
-  const { tenant, branch } = useAuth();
+  const { tenant, branch, admin } = useAuth();
 
   const [accounts, setAccounts] = useState<FloatAccount[]>([]);
   const [loading, setLoading] = useState(true);
@@ -369,6 +493,22 @@ export function FloatPage() {
 
   const [selectedAccount, setSelectedAccount] = useState<FloatAccount | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+
+  // Activity ledger for whichever account is currently open in the detail
+  // panel — which customers' transactions actually moved through it.
+  const [accountTransactions, setAccountTransactions] = useState<LedgerTransaction[]>([]);
+  const [ledgerCustomerNames, setLedgerCustomerNames] = useState<Record<string, string>>({});
+  const [loadingLedger, setLoadingLedger] = useState(false);
+  const [ledgerError, setLedgerError] = useState<string | null>(null);
+
+  // Tracked "Add Funds" (capital injection) — the only way to increase an
+  // EXISTING account's balance. Every top-up writes a real transaction row
+  // (transaction_type: 'float_allocation') so the movement is traceable,
+  // instead of letting the edit form silently overwrite the balance number.
+  const [topUpAccount, setTopUpAccount] = useState<FloatAccount | null>(null);
+  const [topUpForm, setTopUpForm] = useState<TopUpForm>(emptyTopUpForm());
+  const [topUpSubmitting, setTopUpSubmitting] = useState(false);
+  const [topUpError, setTopUpError] = useState<string | null>(null);
 
   useEffect(() => {
     if (tenant) loadData();
@@ -399,6 +539,73 @@ export function FloatPage() {
       setLoading(false);
     }
   };
+
+  // Loads recent transactions tied to a float account (via float_account_id)
+  // and resolves any linked customer ids to display names, so the ledger
+  // reads "Jane Wanjiru → John Otieno" instead of raw uuids.
+  const loadAccountLedger = useCallback(
+    async (accountId: string) => {
+      if (!tenant) return;
+      setLoadingLedger(true);
+      setLedgerError(null);
+      try {
+        const { data, error: txError } = await supabase
+          .from('transactions')
+          .select('*')
+          .eq('tenant_id', tenant.id)
+          .eq('float_account_id', accountId)
+          .order('created_at', { ascending: false })
+          .limit(50);
+        if (txError) throw txError;
+
+        const rows = (data ?? []) as LedgerTransaction[];
+        setAccountTransactions(rows);
+
+        const idsNeeded = new Set<string>();
+        rows.forEach((t) => {
+          if (t.from_customer_id) idsNeeded.add(t.from_customer_id);
+          if (t.to_customer_id) idsNeeded.add(t.to_customer_id);
+        });
+
+        if (idsNeeded.size > 0) {
+          const { data: custRows, error: custError } = await supabase
+            .from('customers')
+            .select('id, first_name, last_name, business_name, customer_type')
+            .in('id', Array.from(idsNeeded));
+          if (custError) throw custError;
+          const map: Record<string, string> = {};
+          (custRows ?? []).forEach((c) => {
+            map[c.id] =
+              c.customer_type !== 'individual'
+                ? c.business_name || 'Unnamed business'
+                : `${c.first_name || ''} ${c.last_name || ''}`.trim() || 'Unnamed';
+          });
+          setLedgerCustomerNames(map);
+        } else {
+          setLedgerCustomerNames({});
+        }
+      } catch (err) {
+        console.error('Error loading float account activity:', err);
+        setLedgerError(err instanceof Error ? err.message : 'Failed to load recent activity');
+        setAccountTransactions([]);
+        setLedgerCustomerNames({});
+      } finally {
+        setLoadingLedger(false);
+      }
+    },
+    [tenant]
+  );
+
+  useEffect(() => {
+    if (selectedAccount) {
+      loadAccountLedger(selectedAccount.id);
+    } else {
+      setAccountTransactions([]);
+      setLedgerCustomerNames({});
+      setLedgerError(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedAccount?.id]);
 
   const filteredAccounts = useMemo(() => {
     if (scope === 'all' || !branch) return accounts;
@@ -467,25 +674,36 @@ export function FloatPage() {
     try {
       if (!tenant) throw new Error('Missing tenant');
 
-      const payload = {
-        tenant_id: tenant.id,
-        branch_id: formData.scope === 'branch' ? branch!.id : null,
-        float_type: formData.float_type,
-        currency: formData.currency,
-        balance: formData.balance,
-        min_threshold: formData.min_threshold,
-        max_threshold: formData.max_threshold,
-        status: formData.status,
-      };
-
       if (editingId) {
+        // Editing NEVER touches balance — that's only ever moved through a
+        // tracked transaction (see handleTopUp). This form only edits the
+        // account's configuration (type, currency, thresholds, status).
         const { error: updateError } = await supabase
           .from('float_accounts')
-          .update(payload as never)
+          .update({
+            float_type: formData.float_type,
+            currency: formData.currency,
+            min_threshold: formData.min_threshold,
+            max_threshold: formData.max_threshold,
+            status: formData.status,
+          } as never)
           .eq('id', editingId)
           .eq('tenant_id', tenant.id);
         if (updateError) throw updateError;
       } else {
+        // Creating a brand-new account is the one place a balance number can
+        // be entered directly — it's an opening balance, the same way Daily
+        // Opening records a starting position, not a balance overwrite.
+        const payload = {
+          tenant_id: tenant.id,
+          branch_id: formData.scope === 'branch' ? branch!.id : null,
+          float_type: formData.float_type,
+          currency: formData.currency,
+          balance: formData.balance,
+          min_threshold: formData.min_threshold,
+          max_threshold: formData.max_threshold,
+          status: formData.status,
+        };
         const { error: insertError } = await supabase.from('float_accounts').insert(payload as never);
         if (insertError) throw insertError;
       }
@@ -516,6 +734,92 @@ export function FloatPage() {
       setError(err instanceof Error ? err.message : 'Failed to delete float account');
     } finally {
       setDeletingId(null);
+    }
+  };
+
+  // --- Tracked "Add Funds" (capital injection) -------------------------------
+
+  const openTopUp = (a: FloatAccount) => {
+    setTopUpAccount(a);
+    setTopUpForm(emptyTopUpForm());
+    setTopUpError(null);
+    setShowForm(false);
+    setSelectedAccount(null);
+  };
+
+  const closeTopUp = () => {
+    setTopUpAccount(null);
+    setTopUpForm(emptyTopUpForm());
+    setTopUpError(null);
+  };
+
+  const handleTopUp = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setTopUpError(null);
+
+    if (!tenant || !admin || !topUpAccount) {
+      setTopUpError('Missing institution or admin context. Please sign in again.');
+      return;
+    }
+    const amount = parseFloat(topUpForm.amount);
+    if (!topUpForm.amount || Number.isNaN(amount) || amount <= 0) {
+      setTopUpError('Enter a valid amount to add.');
+      return;
+    }
+
+    setTopUpSubmitting(true);
+    try {
+      // Re-read the current balance immediately before writing, so two
+      // top-ups submitted close together don't clobber each other. This is
+      // still a read-then-write, not a true atomic increment — for high
+      // concurrency, move this to a Postgres function that does
+      // `balance = balance + amount` in a single statement.
+      const { data: freshAccount, error: fetchError } = await supabase
+        .from('float_accounts')
+        .select('balance')
+        .eq('id', topUpAccount.id)
+        .eq('tenant_id', tenant.id)
+        .single();
+      if (fetchError) throw fetchError;
+
+      const newBalance = Number(freshAccount.balance || 0) + amount;
+
+      const { error: updateError } = await supabase
+        .from('float_accounts')
+        .update({ balance: newBalance } as never)
+        .eq('id', topUpAccount.id)
+        .eq('tenant_id', tenant.id);
+      if (updateError) throw updateError;
+
+      // Record the movement itself — same transaction_type Transactions uses
+      // for a manual float top-up, so this shows up in the ledger either way.
+      const { error: txError } = await supabase.from('transactions').insert({
+        tenant_id: tenant.id,
+        branch_id: topUpAccount.branch_id,
+        transaction_type: 'float_allocation',
+        amount,
+        currency: topUpAccount.currency,
+        float_account_id: topUpAccount.id,
+        payment_source: topUpForm.source,
+        notes: topUpForm.notes.trim() || `Capital injection into ${floatTypeLabel(topUpAccount.float_type)}`,
+        status: 'approved',
+        created_by: admin.id,
+      } as never);
+      if (txError) {
+        // The balance already moved; surface this clearly rather than
+        // silently losing the audit trail for this top-up.
+        throw new Error(
+          `Funds were added, but the transaction record failed to save (${txError.message}). Please note this manually.`
+        );
+      }
+
+      await loadData();
+      closeTopUp();
+    } catch (err) {
+      console.error('Error adding funds:', err);
+      setTopUpError(err instanceof Error ? err.message : 'Failed to add funds');
+    } finally {
+      setTopUpSubmitting(false);
     }
   };
 
@@ -640,57 +944,71 @@ export function FloatPage() {
             {filteredAccounts.map((account) => {
               const isLow = account.min_threshold != null && Number(account.balance) < Number(account.min_threshold);
               return (
-                <button
+                <div
                   key={account.id}
-                  onClick={() => setSelectedAccount(account)}
-                  className="w-full text-left px-4 sm:px-6 py-4 sm:py-6 hover:bg-slate-50 transition-colors flex items-center gap-3 sm:gap-4"
+                  className="px-4 sm:px-6 py-4 sm:py-6 hover:bg-slate-50 transition-colors flex items-center gap-3 sm:gap-4"
                 >
-                  <div className="w-12 h-12 sm:w-14 sm:h-14 rounded-xl bg-[#ee7b22] text-white flex items-center justify-center flex-shrink-0">
-                    <FloatTypeIcon type={account.float_type} className="w-6 h-6 sm:w-7 sm:h-7" />
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1 sm:gap-4">
-                      <div className="min-w-0">
-                        <div className="flex flex-wrap items-center gap-1.5 sm:gap-2">
-                          <h3 className="font-semibold text-slate-900 capitalize truncate">
-                            {floatTypeLabel(account.float_type)}
-                          </h3>
-                          <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${statusBadgeStyle(account.status)}`}>
-                            {account.status}
-                          </span>
-                          {!account.branch_id && (
-                            <span className="text-xs px-2 py-0.5 rounded-full bg-[#641f60]/10 text-[#641f60] flex items-center gap-1">
-                              <Building2 className="w-3 h-3" /> Tenant-wide
+                  <button
+                    onClick={() => setSelectedAccount(account)}
+                    className="flex items-center gap-3 sm:gap-4 flex-1 min-w-0 text-left"
+                  >
+                    <div className="w-12 h-12 sm:w-14 sm:h-14 rounded-xl bg-[#ee7b22] text-white flex items-center justify-center flex-shrink-0">
+                      <FloatTypeIcon type={account.float_type} className="w-6 h-6 sm:w-7 sm:h-7" />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1 sm:gap-4">
+                        <div className="min-w-0">
+                          <div className="flex flex-wrap items-center gap-1.5 sm:gap-2">
+                            <h3 className="font-semibold text-slate-900 capitalize truncate">
+                              {floatTypeLabel(account.float_type)}
+                            </h3>
+                            <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${statusBadgeStyle(account.status)}`}>
+                              {account.status}
                             </span>
+                            {!account.branch_id && (
+                              <span className="text-xs px-2 py-0.5 rounded-full bg-[#641f60]/10 text-[#641f60] flex items-center gap-1">
+                                <Building2 className="w-3 h-3" /> Tenant-wide
+                              </span>
+                            )}
+                          </div>
+                          <div className="flex items-center gap-1.5 mt-0.5">
+                            <CurrencyBadge code={account.currency} size={16} />
+                            <p className="text-sm text-slate-500">{account.currency}</p>
+                          </div>
+                        </div>
+                        <div className="text-right flex-shrink-0">
+                          <p className="text-lg sm:text-xl font-bold text-slate-900 whitespace-nowrap">
+                            {account.currency} {formatMoney(account.balance)}
+                          </p>
+                          {isLow && (
+                            <p className="text-xs text-[#c46040] flex items-center justify-end gap-1">
+                              <AlertCircle className="w-3 h-3" /> Below minimum
+                            </p>
                           )}
                         </div>
-                        <div className="flex items-center gap-1.5 mt-0.5">
-                          <CurrencyBadge code={account.currency} size={16} />
-                          <p className="text-sm text-slate-500">{account.currency}</p>
-                        </div>
                       </div>
-                      <div className="text-right flex-shrink-0">
-                        <p className="text-lg sm:text-xl font-bold text-slate-900 whitespace-nowrap">
-                          {account.currency} {formatMoney(account.balance)}
-                        </p>
-                        {isLow && (
-                          <p className="text-xs text-[#c46040] flex items-center justify-end gap-1">
-                            <AlertCircle className="w-3 h-3" /> Below minimum
-                          </p>
+                      <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500">
+                        {account.min_threshold != null && (
+                          <span>Min: {account.currency} {formatMoney(account.min_threshold)}</span>
+                        )}
+                        {account.max_threshold != null && (
+                          <span>Max: {account.currency} {formatMoney(account.max_threshold)}</span>
                         )}
                       </div>
                     </div>
-                    <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500">
-                      {account.min_threshold != null && (
-                        <span>Min: {account.currency} {formatMoney(account.min_threshold)}</span>
-                      )}
-                      {account.max_threshold != null && (
-                        <span>Max: {account.currency} {formatMoney(account.max_threshold)}</span>
-                      )}
-                    </div>
-                  </div>
-                  <ChevronRight className="w-5 h-5 text-slate-300 flex-shrink-0 hidden sm:block" />
-                </button>
+                  </button>
+                  <button
+                    onClick={() => openTopUp(account)}
+                    className="hidden sm:inline-flex items-center gap-1.5 px-3 py-2 bg-[#1ebcb2]/10 hover:bg-[#1ebcb2]/20 text-[#1ebcb2] text-sm font-medium rounded-lg transition-colors flex-shrink-0"
+                  >
+                    <Plus className="w-4 h-4" />
+                    Add Funds
+                  </button>
+                  <ChevronRight
+                    className="w-5 h-5 text-slate-300 flex-shrink-0 hidden sm:block cursor-pointer"
+                    onClick={() => setSelectedAccount(account)}
+                  />
+                </div>
               );
             })}
           </div>
@@ -758,21 +1076,44 @@ export function FloatPage() {
                     onChange={(v) => setFormData((prev) => ({ ...prev, currency: v }))}
                   />
                 </Field>
-                <Field label={editingId ? 'Balance' : 'Opening Balance'} required>
-                  <div className="relative">
-                    <DollarSign className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-                    <input
-                      type="number"
-                      step="0.01"
-                      min="0"
-                      value={formData.balance || ''}
-                      onChange={(e) =>
-                        setFormData((prev) => ({ ...prev, balance: parseFloat(e.target.value) || 0 }))
-                      }
-                      className="w-full pl-9 pr-3 py-2.5 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#1ebcb2]"
-                    />
-                  </div>
-                </Field>
+                {editingId ? (
+                  <Field label="Balance">
+                    <div className="px-3 py-2.5 border border-slate-200 rounded-lg bg-slate-50 text-slate-600 flex items-center justify-between gap-2">
+                      <span className="font-medium">
+                        {formData.currency} {formatMoney(formData.balance)}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const account = accounts.find((a) => a.id === editingId);
+                          if (account) openTopUp(account);
+                        }}
+                        className="text-xs font-medium text-[#1ebcb2] hover:underline whitespace-nowrap"
+                      >
+                        Add Funds instead
+                      </button>
+                    </div>
+                    <p className="text-xs text-slate-400 mt-1">
+                      Balance only changes through a tracked transaction — use "Add Funds" to top it up.
+                    </p>
+                  </Field>
+                ) : (
+                  <Field label="Opening Balance" required>
+                    <div className="relative">
+                      <DollarSign className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                      <input
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        value={formData.balance || ''}
+                        onChange={(e) =>
+                          setFormData((prev) => ({ ...prev, balance: parseFloat(e.target.value) || 0 }))
+                        }
+                        className="w-full pl-9 pr-3 py-2.5 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#1ebcb2]"
+                      />
+                    </div>
+                  </Field>
+                )}
               </div>
 
               <div className="grid sm:grid-cols-2 gap-4">
@@ -817,7 +1158,7 @@ export function FloatPage() {
                       type="radio"
                       name="float_scope"
                       checked={formData.scope === 'branch'}
-                      disabled={!branch}
+                      disabled={!branch || !!editingId}
                       onChange={() => setFormData((prev) => ({ ...prev, scope: 'branch' }))}
                       className="text-[#641f60] focus:ring-[#1ebcb2]"
                     />
@@ -829,6 +1170,7 @@ export function FloatPage() {
                       type="radio"
                       name="float_scope"
                       checked={formData.scope === 'tenant_wide'}
+                      disabled={!!editingId}
                       onChange={() => setFormData((prev) => ({ ...prev, scope: 'tenant_wide' }))}
                       className="text-[#641f60] focus:ring-[#1ebcb2]"
                     />
@@ -836,6 +1178,11 @@ export function FloatPage() {
                     Tenant-wide (no branch)
                   </label>
                 </div>
+                {editingId && (
+                  <p className="text-xs text-slate-400 mt-1">
+                    Scope can't be changed after creation — create a new account to move to a different branch.
+                  </p>
+                )}
               </Field>
 
               {editingId && (
@@ -893,6 +1240,122 @@ export function FloatPage() {
         </div>
       )}
 
+      {/* Add Funds modal — the only path that increases an existing
+          account's balance, and it's always backed by a transaction row. */}
+      {topUpAccount && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full">
+            <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between">
+              <h2 className="text-lg font-bold text-[#641f60] flex items-center gap-2">
+                <Wallet className="w-5 h-5" />
+                Add Funds
+              </h2>
+              <button
+                type="button"
+                onClick={closeTopUp}
+                className="p-2 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100"
+                aria-label="Close"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleTopUp} className="p-6 space-y-4">
+              <div className="p-3 bg-slate-50 rounded-lg flex items-center gap-3">
+                <div className="w-9 h-9 rounded-lg bg-[#ee7b22] text-white flex items-center justify-center flex-shrink-0">
+                  <FloatTypeIcon type={topUpAccount.float_type} className="w-5 h-5" />
+                </div>
+                <div className="min-w-0">
+                  <p className="text-sm font-medium text-slate-900 truncate">
+                    {floatTypeLabel(topUpAccount.float_type)}
+                  </p>
+                  <p className="text-xs text-slate-500">
+                    Current balance: {topUpAccount.currency} {formatMoney(topUpAccount.balance)}
+                  </p>
+                </div>
+              </div>
+
+              <Field label="Amount to Add" required>
+                <div className="relative">
+                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-sm font-medium">
+                    {topUpAccount.currency}
+                  </span>
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    autoFocus
+                    value={topUpForm.amount}
+                    onChange={(e) => setTopUpForm((prev) => ({ ...prev, amount: e.target.value }))}
+                    className="w-full pl-14 pr-3 py-2.5 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#1ebcb2]"
+                    placeholder="0.00"
+                  />
+                </div>
+              </Field>
+
+              <Field label="Funding Source" required>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                  {FUNDING_SOURCES.map((s) => (
+                    <button
+                      key={s.value}
+                      type="button"
+                      onClick={() => setTopUpForm((prev) => ({ ...prev, source: s.value }))}
+                      className={`flex items-center justify-center gap-1.5 py-2.5 rounded-lg border-2 text-xs font-medium transition-all ${
+                        topUpForm.source === s.value
+                          ? 'border-[#1ebcb2] bg-[#1ebcb2]/10 text-[#641f60]'
+                          : 'border-slate-200 text-slate-600 hover:border-slate-300'
+                      }`}
+                    >
+                      <s.Icon className="w-4 h-4" />
+                      {s.label}
+                    </button>
+                  ))}
+                </div>
+              </Field>
+
+              <Field label="Notes">
+                <textarea
+                  rows={2}
+                  value={topUpForm.notes}
+                  onChange={(e) => setTopUpForm((prev) => ({ ...prev, notes: e.target.value }))}
+                  placeholder="e.g. Weekly capital top-up from head office"
+                  className="w-full px-3 py-2.5 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#1ebcb2]"
+                />
+              </Field>
+
+              {topUpError && (
+                <div className="p-3 bg-[#c46040]/10 border border-[#c46040]/30 rounded-lg text-[#c46040] text-sm flex items-center gap-2">
+                  <AlertCircle className="w-5 h-5 flex-shrink-0" />
+                  {topUpError}
+                </div>
+              )}
+
+              <div className="flex items-center justify-end gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={closeTopUp}
+                  className="px-4 py-2.5 border border-slate-300 text-slate-700 font-medium rounded-lg hover:bg-slate-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={topUpSubmitting}
+                  className="px-6 py-2.5 bg-[#1ebcb2] hover:bg-[#159089] text-white font-medium rounded-lg shadow-lg disabled:opacity-50 flex items-center gap-2"
+                >
+                  {topUpSubmitting ? (
+                    <Loader2 className="w-5 h-5 animate-spin" />
+                  ) : (
+                    <CheckCircle className="w-5 h-5" />
+                  )}
+                  Confirm &amp; Add Funds
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
       {/* Account Details Panel */}
       {selectedAccount && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-stretch sm:items-center justify-center p-0 sm:p-4">
@@ -928,6 +1391,16 @@ export function FloatPage() {
                 <span className={`inline-block mt-2 text-xs px-2.5 py-1 rounded-full font-medium ${statusBadgeStyle(selectedAccount.status)}`}>
                   {selectedAccount.status}
                 </span>
+                <div className="mt-3">
+                  <button
+                    type="button"
+                    onClick={() => openTopUp(selectedAccount)}
+                    className="inline-flex items-center gap-1.5 px-4 py-2 bg-[#1ebcb2] hover:bg-[#159089] text-white text-sm font-medium rounded-lg transition-colors"
+                  >
+                    <Plus className="w-4 h-4" />
+                    Add Funds
+                  </button>
+                </div>
               </div>
 
               <div className="grid grid-cols-2 gap-4 text-sm">
@@ -981,6 +1454,74 @@ export function FloatPage() {
                     Balance is below the configured minimum threshold.
                   </div>
                 )}
+
+              {/* Recent Activity — which customers' transactions actually
+                  moved through this float account. */}
+              <div className="border-t border-slate-200 pt-4">
+                <h3 className="text-sm font-semibold text-slate-900 mb-3 flex items-center gap-2">
+                  <History className="w-4 h-4 text-slate-400" />
+                  Recent Activity
+                </h3>
+
+                {loadingLedger ? (
+                  <div className="flex items-center justify-center py-8">
+                    <Loader2 className="w-6 h-6 animate-spin text-[#641f60]" />
+                  </div>
+                ) : ledgerError ? (
+                  <div className="p-3 bg-[#c46040]/10 border border-[#c46040]/30 rounded-lg text-[#c46040] text-sm flex items-center justify-between gap-2">
+                    <span className="flex items-center gap-2">
+                      <AlertCircle className="w-4 h-4 flex-shrink-0" />
+                      {ledgerError}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => loadAccountLedger(selectedAccount.id)}
+                      className="text-xs font-medium underline flex-shrink-0"
+                    >
+                      Retry
+                    </button>
+                  </div>
+                ) : accountTransactions.length > 0 ? (
+                  <div className="border border-slate-200 rounded-lg divide-y divide-slate-100 max-h-72 overflow-y-auto">
+                    {accountTransactions.map((t) => {
+                      const Icon = ledgerTxIcon(t.transaction_type);
+                      const iconClasses = ledgerTxIconClasses(t.transaction_type);
+                      const debit = isDebitTx(t.transaction_type);
+                      return (
+                        <div key={t.id} className="px-3 py-2.5 flex items-center gap-2.5">
+                          <div className={`w-8 h-8 rounded-lg ${iconClasses.bg} flex items-center justify-center flex-shrink-0`}>
+                            <Icon className={`w-4 h-4 ${iconClasses.color}`} />
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <p className="text-sm font-medium text-slate-800 capitalize truncate">
+                              {t.transaction_type.replace(/_/g, ' ')}
+                            </p>
+                            <p className="text-xs text-slate-500 truncate">
+                              {ledgerCustomerLabel(t, ledgerCustomerNames)}
+                            </p>
+                          </div>
+                          <div className="text-right flex-shrink-0">
+                            <p className={`text-sm font-semibold whitespace-nowrap ${debit ? 'text-[#c46040]' : 'text-[#1ebcb2]'}`}>
+                              {debit ? '\u2212' : '+'}
+                              {t.currency} {formatMoney(t.amount)}
+                            </p>
+                            <div className="flex items-center justify-end gap-1.5 mt-0.5">
+                              <span className="text-[11px] text-slate-400">
+                                {new Date(t.created_at).toLocaleDateString()}
+                              </span>
+                              {ledgerStatusBadge(t.status)}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div className="p-4 text-center text-sm text-slate-400 border border-dashed border-slate-200 rounded-lg">
+                    No transactions have moved through this account yet.
+                  </div>
+                )}
+              </div>
             </div>
 
             {/* Fixed footer */}

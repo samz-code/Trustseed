@@ -25,6 +25,164 @@ type SavingsAccount = Tables<'savings_accounts'>;
 type Transaction = Tables<'transactions'>;
 type DailyOperation = Tables<'daily_operations'>;
 
+// ============================================================================
+// Currency flags (shared visual language with the rest of the app) — used in
+// the preview table so currency-bearing columns aren't just bare 3-letter
+// codes.
+// ============================================================================
+
+function FlagGraphic({ code }: { code: string }) {
+  switch (code) {
+    case 'USD':
+      return (
+        <>
+          <rect width="40" height="40" fill="#b22234" />
+          <rect y="3.08" width="40" height="3.08" fill="#fff" />
+          <rect y="9.23" width="40" height="3.08" fill="#fff" />
+          <rect y="15.38" width="40" height="3.08" fill="#fff" />
+          <rect y="21.54" width="40" height="3.08" fill="#fff" />
+          <rect y="27.69" width="40" height="3.08" fill="#fff" />
+          <rect y="33.85" width="40" height="3.08" fill="#fff" />
+          <rect width="18" height="21.54" fill="#3c3b6e" />
+          <g fill="#fff">
+            {[4, 10, 16].map((y) =>
+              [3, 7, 11, 15].map((x) => <circle key={`${x}-${y}`} cx={x} cy={y} r="1" />)
+            )}
+          </g>
+        </>
+      );
+    case 'KES':
+      return (
+        <>
+          <rect width="40" height="10" fill="#000" />
+          <rect y="10" width="40" height="4" fill="#fff" />
+          <rect y="14" width="40" height="12" fill="#bb0000" />
+          <rect y="26" width="40" height="4" fill="#fff" />
+          <rect y="30" width="40" height="10" fill="#006600" />
+          <ellipse cx="20" cy="20" rx="4.5" ry="8" fill="#fff" />
+          <ellipse cx="20" cy="20" rx="3" ry="6.5" fill="#bb0000" />
+          <path d="M20 11 L21.5 20 L20 29 L18.5 20 Z" fill="#000" />
+        </>
+      );
+    case 'SSP':
+      return (
+        <>
+          <rect width="40" height="12" fill="#000" />
+          <rect y="12" width="40" height="2" fill="#fff" />
+          <rect y="14" width="40" height="12" fill="#bb0000" />
+          <rect y="26" width="40" height="2" fill="#fff" />
+          <rect y="28" width="40" height="12" fill="#009543" />
+          <path d="M0 0 L20 20 L0 40 Z" fill="#0f47af" />
+          <path d="M4 20 l5.5 -1.8 -3.4 4.7 0 -5.8 3.4 4.7 z" fill="#fcdd09" />
+        </>
+      );
+    case 'UGX':
+      return (
+        <>
+          <rect width="40" height="6.67" fill="#000" />
+          <rect y="6.67" width="40" height="6.67" fill="#fcdc04" />
+          <rect y="13.33" width="40" height="6.67" fill="#d90000" />
+          <rect y="20" width="40" height="6.67" fill="#000" />
+          <rect y="26.67" width="40" height="6.67" fill="#fcdc04" />
+          <rect y="33.33" width="40" height="6.67" fill="#d90000" />
+          <circle cx="20" cy="20" r="6" fill="#fff" />
+          <circle cx="20" cy="20" r="5.4" fill="none" stroke="#000" strokeWidth="0.4" />
+        </>
+      );
+    case 'TZS':
+      return (
+        <>
+          <path d="M0 0 H40 V40 H0 Z" fill="#1eb53a" />
+          <path d="M40 0 V40 H0 Z" fill="#00a3dd" />
+          <path d="M0 40 L40 0 v6 L6 40 Z" fill="#fcd116" />
+          <path d="M0 40 L40 0 h-6 L0 34 Z" fill="#fcd116" />
+          <path d="M0 34 L34 0 h-34 Z M40 6 L6 40 h34 Z" fill="#000" />
+        </>
+      );
+    case 'RWF':
+      return (
+        <>
+          <rect width="40" height="40" fill="#20603d" />
+          <rect width="40" height="26.67" fill="#00a1de" />
+          <rect y="20" width="40" height="6.67" fill="#fad201" />
+          <circle cx="31" cy="9" r="5" fill="#fad201" />
+          {Array.from({ length: 24 }).map((_, i) => {
+            const angle = (i * 15 * Math.PI) / 180;
+            const x1 = 31 + 4 * Math.sin(angle);
+            const y1 = 9 - 4 * Math.cos(angle);
+            const x2 = 31 + 5 * Math.sin(angle);
+            const y2 = 9 - 5 * Math.cos(angle);
+            return <line key={i} x1={x1} y1={y1} x2={x2} y2={y2} stroke="#e5be01" strokeWidth="0.6" />;
+          })}
+        </>
+      );
+    case 'EUR':
+      return (
+        <>
+          <rect width="40" height="40" fill="#003399" />
+          <g fill="#ffcc00">
+            {Array.from({ length: 12 }).map((_, i) => {
+              const angle = (i * 30 * Math.PI) / 180;
+              const cx = 20 + 11 * Math.sin(angle);
+              const cy = 20 - 11 * Math.cos(angle);
+              return <circle key={i} cx={cx} cy={cy} r="1.6" />;
+            })}
+          </g>
+        </>
+      );
+    case 'GBP':
+      return (
+        <>
+          <rect width="40" height="40" fill="#012169" />
+          <path d="M0 0 L40 40 M40 0 L0 40" stroke="#fff" strokeWidth="6" />
+          <path d="M0 0 L40 40 M40 0 L0 40" stroke="#c8102e" strokeWidth="3" />
+          <path d="M20 0 V40 M0 20 H40" stroke="#fff" strokeWidth="10" />
+          <path d="M20 0 V40 M0 20 H40" stroke="#c8102e" strokeWidth="6" />
+        </>
+      );
+    default:
+      return (
+        <>
+          <rect width="40" height="40" fill="#64748b" />
+          <text
+            x="20"
+            y="21"
+            textAnchor="middle"
+            dominantBaseline="central"
+            fontSize="14"
+            fontWeight="700"
+            fill="#fff"
+            fontFamily="system-ui, sans-serif"
+          >
+            {code.slice(0, 2)}
+          </text>
+        </>
+      );
+  }
+}
+
+function CurrencyBadge({ code }: { code: string }) {
+  if (!code || typeof code !== 'string') return null;
+  const clipId = `report-flag-${code}`;
+  return (
+    <svg width={16} height={16} viewBox="0 0 40 40" role="img" aria-label={`${code} flag`} className="inline-block flex-shrink-0 align-middle mr-1.5 -mt-0.5">
+      <defs>
+        <clipPath id={clipId}>
+          <circle cx="20" cy="20" r="20" />
+        </clipPath>
+      </defs>
+      <g clipPath={`url(#${clipId})`}>
+        <FlagGraphic code={code} />
+      </g>
+      <circle cx="20" cy="20" r="19" fill="none" stroke="#00000022" strokeWidth="2" />
+    </svg>
+  );
+}
+
+// Columns whose values are currency codes — the preview table renders these
+// with a flag badge instead of a bare 3-letter string.
+const CURRENCY_COLUMN_KEYS = new Set(['currency']);
+
 type ReportId =
   | 'transactions'
   | 'customers'
@@ -130,6 +288,7 @@ const REPORTS: ReportDef[] = [
     columns: [
       { key: 'loan_number', label: 'Loan No.' },
       { key: 'customer', label: 'Customer' },
+      { key: 'currency', label: 'Currency' },
       { key: 'principal', label: 'Principal' },
       { key: 'outstanding', label: 'Outstanding' },
       { key: 'past_due', label: 'Amount Past Due' },
@@ -150,6 +309,7 @@ const REPORTS: ReportDef[] = [
     columns: [
       { key: 'account_number', label: 'Account No.' },
       { key: 'customer', label: 'Customer' },
+      { key: 'currency', label: 'Currency' },
       { key: 'balance', label: 'Balance' },
       { key: 'available', label: 'Available' },
       { key: 'held', label: 'Held' },
@@ -185,12 +345,6 @@ export function ReportsPage() {
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<ReportResult | null>(null);
   const [previewSearch, setPreviewSearch] = useState('');
-
-  const scopeByBranch = <T extends { branch_id: string | null }>(rows: T[]): T[] => {
-    // Branch-scoped users only see their branch; institution-level sees all.
-    if (!branch) return rows;
-    return rows;
-  };
 
   const generate = useCallback(
     async (def: ReportDef) => {
@@ -275,6 +429,7 @@ export function ReportsPage() {
           rows = loans.map((l: LoanAccount) => ({
             loan_number: l.loan_number,
             customer: customerName(custMap.get(l.customer_id)),
+            currency: l.currency,
             principal: fmtNum(l.principal_amount),
             outstanding: fmtNum(l.total_outstanding),
             past_due: fmtNum(l.amount_past_due),
@@ -309,6 +464,7 @@ export function ReportsPage() {
           rows = accounts.map((a: SavingsAccount) => ({
             account_number: a.account_number,
             customer: customerName(custMap.get(a.customer_id)),
+            currency: a.currency,
             balance: fmtNum(a.balance),
             available: fmtNum(a.available_balance),
             held: fmtNum(a.held_balance),
@@ -337,7 +493,7 @@ export function ReportsPage() {
           }));
         }
 
-        setResult({ def, rows: scopeByBranch(rows as never[]) as typeof rows, generatedAt: new Date().toISOString() });
+        setResult({ def, rows, generatedAt: new Date().toISOString() });
       } catch (err) {
         console.error('Error generating report:', err);
         setError(err instanceof Error ? err.message : 'Failed to generate report');
@@ -463,7 +619,7 @@ export function ReportsPage() {
       )}
 
       {/* Report cards */}
-      <div className="grid md:grid-cols-2 gap-4">
+      <div className="grid sm:grid-cols-2 gap-4">
         {REPORTS.map((def) => (
           <div key={def.id} className="bg-white rounded-xl border border-[#dae1e1] overflow-hidden flex flex-col">
             <div className={`px-6 py-4 ${def.color} text-white flex items-center gap-3`}>
@@ -566,6 +722,9 @@ export function ReportsPage() {
                       <tr key={idx} className="hover:bg-slate-50">
                         {result.def.columns.map((c) => (
                           <td key={c.key} className="px-4 py-2.5 text-slate-700 whitespace-nowrap">
+                            {CURRENCY_COLUMN_KEYS.has(c.key) && row[c.key] ? (
+                              <CurrencyBadge code={String(row[c.key])} />
+                            ) : null}
                             {String(row[c.key] ?? '')}
                           </td>
                         ))}

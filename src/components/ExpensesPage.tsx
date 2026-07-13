@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import {
   ensureDefaultExpenseCategories,
@@ -38,6 +38,7 @@ import {
   MoreHorizontal,
   TrendingUp,
   TrendingDown,
+  ChevronDown,
 } from 'lucide-react';
 
 const PAYMENT_METHODS: { value: ExpensePaymentMethod; label: string }[] = [
@@ -118,6 +119,248 @@ function formatMoneyCompact(value: number, currency = 'KES'): string {
   if (value >= 1_000_000) return `${symbol}${(value / 1_000_000).toFixed(1)}M`;
   if (value >= 1_000) return `${symbol}${(value / 1_000).toFixed(1)}K`;
   return `${symbol}${value.toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
+}
+
+// ============================================================================
+// Currency flags (shared visual language with the rest of the app) — real
+// inline SVG flags rather than emoji, which render as plain text codes on
+// Windows / some Android browsers.
+// ============================================================================
+
+const CURRENCIES = ['KES', 'USD', 'SSP', 'UGX', 'TZS', 'RWF', 'EUR', 'GBP'];
+
+const CURRENCY_NAMES: Record<string, string> = {
+  USD: 'US Dollar',
+  KES: 'Kenyan Shilling',
+  SSP: 'South Sudanese Pound',
+  UGX: 'Ugandan Shilling',
+  TZS: 'Tanzanian Shilling',
+  RWF: 'Rwandan Franc',
+  EUR: 'Euro',
+  GBP: 'British Pound',
+};
+
+function FlagGraphic({ code }: { code: string }) {
+  switch (code) {
+    case 'USD':
+      return (
+        <>
+          <rect width="40" height="40" fill="#b22234" />
+          <rect y="3.08" width="40" height="3.08" fill="#fff" />
+          <rect y="9.23" width="40" height="3.08" fill="#fff" />
+          <rect y="15.38" width="40" height="3.08" fill="#fff" />
+          <rect y="21.54" width="40" height="3.08" fill="#fff" />
+          <rect y="27.69" width="40" height="3.08" fill="#fff" />
+          <rect y="33.85" width="40" height="3.08" fill="#fff" />
+          <rect width="18" height="21.54" fill="#3c3b6e" />
+          <g fill="#fff">
+            {[4, 10, 16].map((y) =>
+              [3, 7, 11, 15].map((x) => <circle key={`${x}-${y}`} cx={x} cy={y} r="1" />)
+            )}
+          </g>
+        </>
+      );
+    case 'KES':
+      return (
+        <>
+          <rect width="40" height="10" fill="#000" />
+          <rect y="10" width="40" height="4" fill="#fff" />
+          <rect y="14" width="40" height="12" fill="#bb0000" />
+          <rect y="26" width="40" height="4" fill="#fff" />
+          <rect y="30" width="40" height="10" fill="#006600" />
+          <ellipse cx="20" cy="20" rx="4.5" ry="8" fill="#fff" />
+          <ellipse cx="20" cy="20" rx="3" ry="6.5" fill="#bb0000" />
+          <path d="M20 11 L21.5 20 L20 29 L18.5 20 Z" fill="#000" />
+        </>
+      );
+    case 'SSP':
+      return (
+        <>
+          <rect width="40" height="12" fill="#000" />
+          <rect y="12" width="40" height="2" fill="#fff" />
+          <rect y="14" width="40" height="12" fill="#bb0000" />
+          <rect y="26" width="40" height="2" fill="#fff" />
+          <rect y="28" width="40" height="12" fill="#009543" />
+          <path d="M0 0 L20 20 L0 40 Z" fill="#0f47af" />
+          <path d="M4 20 l5.5 -1.8 -3.4 4.7 0 -5.8 3.4 4.7 z" fill="#fcdd09" />
+        </>
+      );
+    case 'UGX':
+      return (
+        <>
+          <rect width="40" height="6.67" fill="#000" />
+          <rect y="6.67" width="40" height="6.67" fill="#fcdc04" />
+          <rect y="13.33" width="40" height="6.67" fill="#d90000" />
+          <rect y="20" width="40" height="6.67" fill="#000" />
+          <rect y="26.67" width="40" height="6.67" fill="#fcdc04" />
+          <rect y="33.33" width="40" height="6.67" fill="#d90000" />
+          <circle cx="20" cy="20" r="6" fill="#fff" />
+          <circle cx="20" cy="20" r="5.4" fill="none" stroke="#000" strokeWidth="0.4" />
+        </>
+      );
+    case 'TZS':
+      return (
+        <>
+          <path d="M0 0 H40 V40 H0 Z" fill="#1eb53a" />
+          <path d="M40 0 V40 H0 Z" fill="#00a3dd" />
+          <path d="M0 40 L40 0 v6 L6 40 Z" fill="#fcd116" />
+          <path d="M0 40 L40 0 h-6 L0 34 Z" fill="#fcd116" />
+          <path d="M0 34 L34 0 h-34 Z M40 6 L6 40 h34 Z" fill="#000" />
+        </>
+      );
+    case 'RWF':
+      return (
+        <>
+          <rect width="40" height="40" fill="#20603d" />
+          <rect width="40" height="26.67" fill="#00a1de" />
+          <rect y="20" width="40" height="6.67" fill="#fad201" />
+          <circle cx="31" cy="9" r="5" fill="#fad201" />
+          {Array.from({ length: 24 }).map((_, i) => {
+            const angle = (i * 15 * Math.PI) / 180;
+            const x1 = 31 + 4 * Math.sin(angle);
+            const y1 = 9 - 4 * Math.cos(angle);
+            const x2 = 31 + 5 * Math.sin(angle);
+            const y2 = 9 - 5 * Math.cos(angle);
+            return <line key={i} x1={x1} y1={y1} x2={x2} y2={y2} stroke="#e5be01" strokeWidth="0.6" />;
+          })}
+        </>
+      );
+    case 'EUR':
+      return (
+        <>
+          <rect width="40" height="40" fill="#003399" />
+          <g fill="#ffcc00">
+            {Array.from({ length: 12 }).map((_, i) => {
+              const angle = (i * 30 * Math.PI) / 180;
+              const cx = 20 + 11 * Math.sin(angle);
+              const cy = 20 - 11 * Math.cos(angle);
+              return <circle key={i} cx={cx} cy={cy} r="1.6" />;
+            })}
+          </g>
+        </>
+      );
+    case 'GBP':
+      return (
+        <>
+          <rect width="40" height="40" fill="#012169" />
+          <path d="M0 0 L40 40 M40 0 L0 40" stroke="#fff" strokeWidth="6" />
+          <path d="M0 0 L40 40 M40 0 L0 40" stroke="#c8102e" strokeWidth="3" />
+          <path d="M20 0 V40 M0 20 H40" stroke="#fff" strokeWidth="10" />
+          <path d="M20 0 V40 M0 20 H40" stroke="#c8102e" strokeWidth="6" />
+        </>
+      );
+    default:
+      return (
+        <>
+          <rect width="40" height="40" fill="#64748b" />
+          <text
+            x="20"
+            y="21"
+            textAnchor="middle"
+            dominantBaseline="central"
+            fontSize="14"
+            fontWeight="700"
+            fill="#fff"
+            fontFamily="system-ui, sans-serif"
+          >
+            {code.slice(0, 2)}
+          </text>
+        </>
+      );
+  }
+}
+
+function CurrencyBadge({ code, size = 16 }: { code: string; size?: number }) {
+  const clipId = `expense-flag-${code}`;
+  return (
+    <svg width={size} height={size} viewBox="0 0 40 40" role="img" aria-label={`${code} flag`} className="inline-block flex-shrink-0 align-middle">
+      <defs>
+        <clipPath id={clipId}>
+          <circle cx="20" cy="20" r="20" />
+        </clipPath>
+      </defs>
+      <g clipPath={`url(#${clipId})`}>
+        <FlagGraphic code={code} />
+      </g>
+      <circle cx="20" cy="20" r="19" fill="none" stroke="#00000022" strokeWidth="2" />
+    </svg>
+  );
+}
+
+function CurrencySelect({ value, onChange, disabled }: { value: string; onChange: (v: string) => void; disabled?: boolean }) {
+  const [open, setOpen] = useState(false);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) setOpen(false);
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  return (
+    <div className="relative" ref={containerRef}>
+      <button
+        type="button"
+        disabled={disabled}
+        onClick={() => setOpen((p) => !p)}
+        className={`w-full flex items-center gap-2 pl-3 pr-3 py-2 border rounded-lg text-left text-sm transition-colors ${
+          disabled ? 'bg-slate-50 text-slate-400 border-slate-200' : 'border-slate-300 bg-white hover:border-slate-400'
+        }`}
+      >
+        <CurrencyBadge code={value} />
+        <span className="flex-1 min-w-0 truncate">
+          <span className="font-medium">{value}</span>
+        </span>
+        <ChevronDown className="w-4 h-4 text-slate-400 flex-shrink-0" />
+      </button>
+      {open && !disabled && (
+        <div className="absolute z-30 mt-1 w-full bg-white border border-slate-200 rounded-lg shadow-lg max-h-56 overflow-y-auto">
+          {CURRENCIES.map((c) => (
+            <button
+              key={c}
+              type="button"
+              onClick={() => {
+                onChange(c);
+                setOpen(false);
+              }}
+              className={`w-full flex items-center gap-2 px-3 py-2 text-left text-sm hover:bg-slate-50 ${c === value ? 'bg-[#1ebcb2]/10' : ''}`}
+            >
+              <CurrencyBadge code={c} />
+              <span className={c === value ? 'text-[#641f60] font-medium' : 'text-slate-700'}>{c}</span>
+              <span className="text-slate-400 truncate">{CURRENCY_NAMES[c] || ''}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Expenses can now be recorded in any currency, not just the tenant default,
+// so a blended "sum everything" total would be misleading once more than one
+// currency shows up in the visible set. This renders either a single big
+// figure (the common case — one currency) or a compact per-currency stack.
+function MoneyStat({ totals, compact }: { totals: [string, number][]; compact?: boolean }) {
+  if (totals.length <= 1) {
+    const [currency, value] = totals[0] ?? ['KES', 0];
+    return (
+      <h3 className="text-xl sm:text-2xl font-bold text-slate-900 truncate">
+        {compact ? formatMoneyCompact(value, currency) : formatMoney(value, currency)}
+      </h3>
+    );
+  }
+  return (
+    <div className="space-y-0.5">
+      {totals.map(([currency, value]) => (
+        <div key={currency} className="flex items-center gap-1.5 text-sm sm:text-base font-bold text-slate-900">
+          <CurrencyBadge code={currency} size={14} />
+          {compact ? formatMoneyCompact(value, currency) : formatMoney(value, currency)}
+        </div>
+      ))}
+    </div>
+  );
 }
 
 function statusBadge(status: ExpenseStatus): {
@@ -210,6 +453,7 @@ const CHART_PALETTE = ['#641f60', '#1ebcb2', '#ee7b22', '#9DB282', '#c46040', '#
 const CAN_APPROVE_ROLES = new Set([
   'super_admin',
   'institution_admin',
+  'head_office_admin',
   'branch_manager',
   'finance_officer',
   'accountant',
@@ -228,8 +472,12 @@ export function ExpensesPage() {
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
+  const defaultCurrency =
+    (tenant?.settings as { default_currency?: string } | null)?.default_currency || 'KES';
+
   const [description, setDescription] = useState('');
   const [amount, setAmount] = useState('');
+  const [currency, setCurrency] = useState(defaultCurrency);
   const [categoryId, setCategoryId] = useState('');
   const [expenseDate, setExpenseDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [paymentMethod, setPaymentMethod] = useState<ExpensePaymentMethod>('cash');
@@ -240,8 +488,6 @@ export function ExpensesPage() {
   const [rejectingId, setRejectingId] = useState<string | null>(null);
   const [rejectReason, setRejectReason] = useState('');
 
-  const defaultCurrency =
-    (tenant?.settings as { default_currency?: string } | null)?.default_currency || 'KES';
   const seesAllBranches =
     admin?.role === 'super_admin' ||
     admin?.role === 'institution_admin' ||
@@ -282,6 +528,7 @@ export function ExpensesPage() {
   const resetForm = () => {
     setDescription('');
     setAmount('');
+    setCurrency(defaultCurrency);
     setCategoryId('');
     setExpenseDate(new Date().toISOString().slice(0, 10));
     setPaymentMethod('cash');
@@ -321,13 +568,13 @@ export function ExpensesPage() {
         categoryId: categoryId || null,
         description: description.trim(),
         amount: parsedAmount,
-        currency: defaultCurrency,
+        currency,
         expenseDate,
         paymentMethod,
         vendorName: vendorName.trim() || null,
         referenceNumber: referenceNumber.trim() || null,
         notes: notes.trim() || null,
-        submittedBy: admin?.user_id ?? null,
+        submittedBy: admin?.id ?? null,
       });
       resetForm();
       setShowForm(false);
@@ -343,7 +590,7 @@ export function ExpensesPage() {
   const handleApprove = async (id: string) => {
     setActioningId(id);
     try {
-      await approveExpense(id, admin?.user_id ?? null);
+      await approveExpense(id, admin?.id ?? null);
       await loadData();
     } catch (err) {
       console.error('Error approving expense:', err);
@@ -381,11 +628,13 @@ export function ExpensesPage() {
     }
   };
 
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+
   const handleDelete = async (id: string) => {
-    if (!window.confirm('Delete this expense record? This cannot be undone.')) return;
     setActioningId(id);
     try {
       await deleteExpense(id);
+      setConfirmDeleteId(null);
       await loadData();
     } catch (err) {
       console.error('Error deleting expense:', err);
@@ -395,16 +644,40 @@ export function ExpensesPage() {
     }
   };
 
-  const totalVisible = expenses.reduce((sum, e) => sum + Number(e.amount || 0), 0);
   const pendingCount = expenses.filter((e) => e.status === 'pending').length;
-  const approvedOrPaidTotal = expenses
-    .filter((e) => e.status === 'approved' || e.status === 'paid')
-    .reduce((sum, e) => sum + Number(e.amount || 0), 0);
 
+  // Expenses can be recorded in any currency now, so a single blended sum
+  // would be misleading the moment more than one currency shows up in the
+  // visible set. Group by currency instead; MoneyStat renders a single big
+  // figure when there's only one, or a compact stack when there's more.
+  const totalsByCurrency = useMemo(() => {
+    const map = new Map<string, number>();
+    expenses.forEach((e) => {
+      const cur = e.currency || defaultCurrency;
+      map.set(cur, (map.get(cur) || 0) + Number(e.amount || 0));
+    });
+    return Array.from(map.entries()).sort((a, b) => b[1] - a[1]);
+  }, [expenses, defaultCurrency]);
+
+  const approvedPaidTotalsByCurrency = useMemo(() => {
+    const map = new Map<string, number>();
+    expenses
+      .filter((e) => e.status === 'approved' || e.status === 'paid')
+      .forEach((e) => {
+        const cur = e.currency || defaultCurrency;
+        map.set(cur, (map.get(cur) || 0) + Number(e.amount || 0));
+      });
+    return Array.from(map.entries()).sort((a, b) => b[1] - a[1]);
+  }, [expenses, defaultCurrency]);
+
+  // The category bar chart compares totals by relative bar length, which
+  // only makes sense within a single currency — scoped to the tenant's
+  // default currency, with a caption below making that explicit rather than
+  // silently mixing currencies into one misleading bar.
   const categoryBreakdown = useMemo(() => {
     const totals = new Map<string, number>();
     expenses
-      .filter((e) => e.status === 'approved' || e.status === 'paid')
+      .filter((e) => (e.status === 'approved' || e.status === 'paid') && (e.currency || defaultCurrency) === defaultCurrency)
       .forEach((e) => {
         const key = e.categoryName || 'Uncategorized';
         totals.set(key, (totals.get(key) || 0) + Number(e.amount || 0));
@@ -417,7 +690,12 @@ export function ExpensesPage() {
       pct: max > 0 ? (total / max) * 100 : 0,
       color: CHART_PALETTE[idx % CHART_PALETTE.length],
     }));
-  }, [expenses]);
+  }, [expenses, defaultCurrency]);
+
+  const hasOtherCurrencyExpenses = useMemo(
+    () => expenses.some((e) => (e.currency || defaultCurrency) !== defaultCurrency),
+    [expenses, defaultCurrency]
+  );
 
   return (
     <div className="space-y-6 px-2 sm:px-0 max-w-full overflow-x-hidden">
@@ -453,59 +731,58 @@ export function ExpensesPage() {
 
       {/* Grid Layout Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <div className="bg-white rounded-xl border border-slate-200 p-4 sm:p-5 hover:shadow-md transition-shadow">
+        <div className="bg-white rounded-xl border border-slate-200 border-t-4 border-t-[#641f60] p-4 sm:p-5 hover:shadow-md transition-all">
           <div className="flex items-center justify-between mb-3">
-            <div className="p-2 rounded-lg bg-[#641f60]/10">
+            <div className="w-10 h-10 rounded-xl bg-[#641f60]/10 flex items-center justify-center">
               <Receipt className="w-5 h-5 text-[#641f60]" />
             </div>
             <span className="text-xs font-medium px-2 py-1 rounded-full bg-slate-100 text-slate-600">
               {STATUS_FILTERS.find((s) => s.value === statusFilter)?.label}
             </span>
           </div>
-          <h3 className="text-xl sm:text-2xl font-bold text-slate-900 truncate">
-            {formatMoney(totalVisible, defaultCurrency)}
-          </h3>
+          <MoneyStat totals={totalsByCurrency} />
           <p className="text-xs sm:text-sm text-slate-500 mt-1">
             {expenses.length} record{expenses.length === 1 ? '' : 's'} shown
           </p>
         </div>
 
-        <div className="bg-white rounded-xl border border-slate-200 p-4 sm:p-5 hover:shadow-md transition-shadow">
+        <div className="bg-white rounded-xl border border-slate-200 border-t-4 border-t-[#1ebcb2] p-4 sm:p-5 hover:shadow-md transition-all">
           <div className="flex items-center justify-between mb-3">
-            <div className="p-2 rounded-lg bg-[#1ebcb2]/10">
+            <div className="w-10 h-10 rounded-xl bg-[#1ebcb2]/10 flex items-center justify-center">
               <TrendingUp className="w-5 h-5 text-[#1ebcb2]" />
             </div>
             <span className="text-xs font-medium px-2 py-1 rounded-full bg-[#1ebcb2]/10 text-[#1ebcb2]">
               confirmed
             </span>
           </div>
-          <h3 className="text-xl sm:text-2xl font-bold text-slate-900 truncate">
-            {formatMoney(approvedOrPaidTotal, defaultCurrency)}
-          </h3>
+          <MoneyStat totals={approvedPaidTotalsByCurrency} />
           <p className="text-xs sm:text-sm text-slate-500 mt-1">approved + paid</p>
         </div>
 
-        <div className="bg-white rounded-xl border border-slate-200 p-4 sm:p-5 hover:shadow-md transition-shadow">
+        <div className="bg-white rounded-xl border border-slate-200 border-t-4 border-t-[#ee7b22] p-4 sm:p-5 hover:shadow-md transition-all">
           <div className="flex items-center justify-between mb-3">
-            <div className="p-2 rounded-lg bg-[#ee7b22]/10">
+            <div className="w-10 h-10 rounded-xl bg-[#ee7b22]/10 flex items-center justify-center">
               <Clock className="w-5 h-5 text-[#ee7b22]" />
             </div>
             {pendingCount > 0 && (
-              <span className="w-2 h-2 rounded-full bg-[#ee7b22] animate-pulse" />
+              <span className="relative flex h-2.5 w-2.5">
+                <span className="absolute inline-flex h-full w-full rounded-full bg-[#ee7b22] opacity-75 animate-ping" />
+                <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-[#ee7b22]" />
+              </span>
             )}
           </div>
           <h3 className="text-xl sm:text-2xl font-bold text-slate-900">{pendingCount}</h3>
           <p className="text-xs sm:text-sm text-slate-500 mt-1">awaiting review</p>
         </div>
 
-        <div className="bg-white rounded-xl border border-slate-200 p-4 sm:p-5 hover:shadow-md transition-shadow">
+        <div className="bg-white rounded-xl border border-slate-200 border-t-4 border-t-slate-300 p-4 sm:p-5 hover:shadow-md transition-all">
           <div className="flex items-center justify-between mb-3">
-            <div className="p-2 rounded-lg bg-slate-100">
+            <div className="w-10 h-10 rounded-xl bg-slate-100 flex items-center justify-center">
               <TrendingDown className="w-5 h-5 text-slate-500" />
             </div>
           </div>
           <h3 className="text-base sm:text-lg font-bold text-slate-900 truncate">
-            {seesAllBranches && branches.length > 1 ? 'All branches' : branch?.name || 'Current branch'}
+            {seesAllBranches && (branches?.length ?? 0) > 1 ? 'All branches' : branch?.name || 'Current branch'}
           </h3>
           <p className="text-xs sm:text-sm text-slate-500 mt-1">scope</p>
         </div>
@@ -514,7 +791,13 @@ export function ExpensesPage() {
       {/* Mini Bar Chart Stack */}
       {!loading && categoryBreakdown.length > 0 && (
         <div className="bg-white rounded-xl border border-slate-200 p-4 sm:p-5">
-          <h2 className="font-semibold text-sm sm:text-base text-slate-900 mb-4">Top Categories (Approved + Paid)</h2>
+          <div className="flex items-center justify-between gap-2 mb-4">
+            <h2 className="font-semibold text-sm sm:text-base text-slate-900">Top Categories (Approved + Paid)</h2>
+            <span className="inline-flex items-center gap-1 text-[11px] text-slate-400 flex-shrink-0">
+              <CurrencyBadge code={defaultCurrency} size={13} />
+              in {defaultCurrency}
+            </span>
+          </div>
           <div className="space-y-3">
             {categoryBreakdown.map((c) => (
               <div key={c.name} className="flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-3">
@@ -533,6 +816,11 @@ export function ExpensesPage() {
               </div>
             ))}
           </div>
+          {hasOtherCurrencyExpenses && (
+            <p className="text-[11px] text-slate-400 mt-3">
+              Expenses recorded in other currencies aren&rsquo;t included in this chart.
+            </p>
+          )}
         </div>
       )}
 
@@ -663,13 +951,13 @@ export function ExpensesPage() {
                           </span>
                         </td>
                         <td className="px-5 py-4">
-                          <div className="flex items-center justify-end gap-1.5 opacity-70 group-hover:opacity-100 transition-opacity">
+                          <div className="flex items-center justify-end gap-1.5">
                             {exp.status === 'pending' && canApprove && (
                               <>
                                 <button
                                   onClick={() => handleApprove(exp.id)}
                                   disabled={isActioning}
-                                  className="p-1.5 rounded-lg text-[#1ebcb2] hover:bg-[#1ebcb2]/10 transition-colors"
+                                  className="p-1.5 rounded-lg text-[#1ebcb2] bg-[#1ebcb2]/10 hover:bg-[#1ebcb2]/20 transition-colors disabled:opacity-50"
                                   title="Approve"
                                 >
                                   {isActioning ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
@@ -677,7 +965,7 @@ export function ExpensesPage() {
                                 <button
                                   onClick={() => setRejectingId(exp.id)}
                                   disabled={isActioning}
-                                  className="p-1.5 rounded-lg text-[#c46040] hover:bg-[#c46040]/10 transition-colors"
+                                  className="p-1.5 rounded-lg text-[#c46040] bg-[#c46040]/10 hover:bg-[#c46040]/20 transition-colors disabled:opacity-50"
                                   title="Reject"
                                 >
                                   <XCircle className="w-4 h-4" />
@@ -688,16 +976,16 @@ export function ExpensesPage() {
                               <button
                                 onClick={() => handleMarkPaid(exp.id)}
                                 disabled={isActioning}
-                                className="px-2.5 py-1 rounded-lg text-xs font-medium text-[#641f60] bg-[#641f60]/5 hover:bg-[#641f60]/10 transition-colors"
+                                className="px-2.5 py-1.5 rounded-lg text-xs font-semibold text-white bg-[#641f60] hover:bg-[#4a1646] transition-colors disabled:opacity-50"
                               >
                                 Mark Paid
                               </button>
                             )}
                             {canApprove && (
                               <button
-                                onClick={() => handleDelete(exp.id)}
+                                onClick={() => setConfirmDeleteId(exp.id)}
                                 disabled={isActioning}
-                                className="p-1.5 rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-600 transition-colors"
+                                className="p-1.5 rounded-lg text-[#c46040] bg-[#c46040]/5 hover:bg-[#c46040]/15 transition-colors disabled:opacity-50"
                                 title="Delete"
                               >
                                 <Trash2 className="w-4 h-4" />
@@ -785,9 +1073,9 @@ export function ExpensesPage() {
                         )}
                         {canApprove && (
                           <button
-                            onClick={() => handleDelete(exp.id)}
+                            onClick={() => setConfirmDeleteId(exp.id)}
                             disabled={isActioning}
-                            className="p-1.5 rounded-md text-slate-400 hover:text-slate-600 active:bg-slate-50"
+                            className="p-1.5 rounded-md text-[#c46040] bg-[#c46040]/5 active:bg-[#c46040]/15"
                           >
                             <Trash2 className="w-3.5 h-3.5" />
                           </button>
@@ -842,6 +1130,52 @@ export function ExpensesPage() {
         </div>
       )}
 
+      {/* Delete Confirmation Modal — replaces window.confirm(), which can be
+          silently blocked in sandboxed/embedded browser contexts and looks
+          identical to "nothing happened" when that occurs. */}
+      {confirmDeleteId && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-sm p-5 sm:p-6">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-10 h-10 rounded-full bg-[#c46040]/10 flex items-center justify-center flex-shrink-0">
+                <Trash2 className="w-5 h-5 text-[#c46040]" />
+              </div>
+              <h3 className="font-semibold text-slate-900">Delete this expense?</h3>
+            </div>
+            <p className="text-sm text-slate-600">
+              {(() => {
+                const target = expenses.find((e) => e.id === confirmDeleteId);
+                return target ? (
+                  <>
+                    <span className="font-medium text-slate-800">{target.description}</span> &middot;{' '}
+                    {formatMoney(target.amount, target.currency)}. This cannot be undone.
+                  </>
+                ) : (
+                  'This cannot be undone.'
+                );
+              })()}
+            </p>
+            <div className="flex gap-2 mt-4">
+              <button
+                onClick={() => setConfirmDeleteId(null)}
+                disabled={actioningId === confirmDeleteId}
+                className="flex-1 py-2.5 text-sm rounded-lg border border-slate-300 text-slate-600 font-medium hover:bg-slate-50 transition-colors disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => handleDelete(confirmDeleteId)}
+                disabled={actioningId === confirmDeleteId}
+                className="flex-1 py-2.5 text-sm rounded-lg bg-[#c46040] hover:bg-[#c46040]/90 text-white font-medium flex items-center justify-center gap-2 disabled:opacity-50"
+              >
+                {actioningId === confirmDeleteId && <Loader2 className="w-4 h-4 animate-spin" />}
+                Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Create Expense Form Modal Component Sheet */}
       {showForm && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 overflow-y-auto">
@@ -874,9 +1208,9 @@ export function ExpensesPage() {
                 />
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs sm:text-sm font-medium text-slate-700 mb-1.5">Amount ({defaultCurrency}) *</label>
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                <div className="col-span-1">
+                  <label className="block text-xs sm:text-sm font-medium text-slate-700 mb-1.5">Amount *</label>
                   <input
                     type="number"
                     inputMode="decimal"
@@ -889,7 +1223,11 @@ export function ExpensesPage() {
                     className="w-full px-3.5 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-[#1ebcb2]"
                   />
                 </div>
-                <div>
+                <div className="col-span-1">
+                  <label className="block text-xs sm:text-sm font-medium text-slate-700 mb-1.5">Currency</label>
+                  <CurrencySelect value={currency} onChange={setCurrency} disabled={submitting} />
+                </div>
+                <div className="col-span-2 sm:col-span-1">
                   <label className="block text-xs sm:text-sm font-medium text-slate-700 mb-1.5">Date *</label>
                   <input
                     type="date"

@@ -3,6 +3,7 @@ import { useAuth } from '../contexts/AuthContext';
 import { supabase } from '../lib/supabase';
 import type { Transaction, TransactionType, Customer, Wallet, LoanAccount, FloatAccount } from '../types';
 import { useTenantExchangeRates, lookupRate } from '../lib/forexRates';
+import { ReceiptModal, buildReceiptData, type ReceiptData } from '../components/TransactionReceipt';
 import {
   ArrowDownRight,
   ArrowUpRight,
@@ -31,7 +32,22 @@ import {
   ChevronDown,
   Wallet as WalletIcon,
   ShieldAlert,
+  KeyRound,
+  ShieldCheck,
 } from 'lucide-react';
+
+// Local extension of the generated Transaction type for the two columns this
+// PIN-confirmation flow needs. These must exist on `transactions` in the
+// database:
+//   ALTER TABLE transactions ADD COLUMN requires_pin_confirmation boolean NOT NULL DEFAULT false;
+//   ALTER TABLE transactions ADD COLUMN pin_confirmed_at timestamptz;
+// Cast through this type rather than `any` so the rest of the file stays
+// type-checked; once your generated Supabase types include these columns
+// this alias can be dropped in favor of `Transaction` directly.
+type PinGatedTransaction = Transaction & {
+  requires_pin_confirmation: boolean;
+  pin_confirmed_at: string | null;
+};
 
 // ============================================================================
 // Constants
@@ -51,9 +67,6 @@ const TRANSACTION_TYPES: { value: TransactionType; label: string; icon: React.Re
   { value: 'savings_withdrawal', label: 'Savings Withdrawal', icon: <PiggyBank className="w-5 h-5" /> },
   { value: 'float_allocation', label: 'Add Funds (Float)', icon: <Receipt className="w-5 h-5" /> },
 ];
-
-// The 6 quick-select cards shown in the modal, matching the reference layout.
-const QUICK_TYPES = TRANSACTION_TYPES.slice(0, 6);
 
 const CURRENCIES = ['KES', 'USD', 'SSP', 'UGX', 'TZS', 'RWF', 'EUR', 'GBP'];
 
@@ -238,12 +251,26 @@ const LARGE_AMOUNT_APPROVAL_THRESHOLD = 1000;
 
 type RequiredRole = 'branch_manager' | 'compliance_officer';
 
+// Roles whose transfers always route through manager approval + PIN
+// confirmation before executing, regardless of amount. Front-line staff who
+// handle cash/customer-facing transfers directly.
+const CASHIER_LIKE_ROLES = new Set(['cashier', 'teller']);
+
 // Decides who has to sign off on a transaction before it can complete.
 // International transfers always route to compliance (AML / source-of-funds
-// obligations), regardless of amount. Everything else only needs approval
-// once it crosses the size threshold, and goes to the branch manager.
-function resolveRequiredRole(amount: number, isInternational: boolean): RequiredRole | null {
+// obligations), regardless of amount. A transfer initiated by a cashier/
+// teller always routes to the branch manager, regardless of amount — this
+// is a deliberate control (every cashier-initiated transfer is approved
+// before it executes), not a size threshold. Everything else only needs
+// approval once it crosses the size threshold.
+function resolveRequiredRole(
+  amount: number,
+  isInternational: boolean,
+  transactionType: TransactionType,
+  creatorRole: string | undefined
+): RequiredRole | null {
   if (isInternational) return 'compliance_officer';
+  if (transactionType === 'transfer' && CASHIER_LIKE_ROLES.has(creatorRole ?? '')) return 'branch_manager';
   if (amount >= LARGE_AMOUNT_APPROVAL_THRESHOLD) return 'branch_manager';
   return null;
 }
@@ -638,18 +665,12 @@ interface TransactionFormData {
   to_wallet_id: string;
   float_account_id: string;
   loan_account_id: string;
-  sender_name: string;
-  sender_phone: string;
   receiver_name: string;
   receiver_phone: string;
   is_international: boolean;
   payment_source: PaymentSource | '';
   exchange_rate: number;
-  charges: number;
-  approval_reference: string;
   destination_country: string;
-  purpose: string;
-  notes: string;
 }
 
 function emptyFormData(defaultType?: TransactionType): TransactionFormData {
@@ -664,18 +685,12 @@ function emptyFormData(defaultType?: TransactionType): TransactionFormData {
     to_wallet_id: '',
     float_account_id: '',
     loan_account_id: '',
-    sender_name: '',
-    sender_phone: '',
     receiver_name: '',
     receiver_phone: '',
     is_international: false,
     payment_source: '',
     exchange_rate: 0,
-    charges: 0,
-    approval_reference: '',
     destination_country: '',
-    purpose: '',
-    notes: '',
   };
 }
 
@@ -739,6 +754,17 @@ export function TransactionsPage({ defaultType }: TransactionsPageProps = {}) {
   const [loanAccounts, setLoanAccounts] = useState<LoanAccount[]>([]);
   const [loadingFromWallets, setLoadingFromWallets] = useState(false);
   const [rateManuallyEdited, setRateManuallyEdited] = useState(false);
+
+  // --- PIN confirmation (post-manager-approval, pre-execution) --------------
+  const [pinModalTx, setPinModalTx] = useState<PinGatedTransaction | null>(null);
+  const [pinValue, setPinValue] = useState('');
+  const [pinSubmitting, setPinSubmitting] = useState(false);
+  const [pinError, setPinError] = useState<string | null>(null);
+
+  // --- Receipt (auto-opens after an immediate, no-approval-needed
+  // transaction executes; also reopenable from the list via "Reprint") ------
+  const [receiptData, setReceiptData] = useState<ReceiptData | null>(null);
+  const [reprintingId, setReprintingId] = useState<string | null>(null);
 
   useEffect(() => {
     if (tenant) loadData();
@@ -934,6 +960,69 @@ export function TransactionsPage({ defaultType }: TransactionsPageProps = {}) {
     return matchesSearch && matchesType && matchesStatus;
   });
 
+  // Transfers THIS cashier created, that a manager has approved, but that
+  // still need this cashier's PIN before they execute. Scoped to created_by
+  // client-side for UX only — the real access boundary must be a Supabase
+  // RLS policy on `transactions` (created_by = auth.uid() or role-based),
+  // since a client-side filter alone doesn't stop a modified client from
+  // querying other cashiers' rows.
+  const myPinConfirmations = useMemo(() => {
+    if (!admin) return [];
+    return (transactions as PinGatedTransaction[]).filter(
+      (tx) =>
+        tx.created_by === admin.id &&
+        tx.requires_pin_confirmation &&
+        tx.status === 'approved' &&
+        !tx.pin_confirmed_at
+    );
+  }, [transactions, admin]);
+
+  const openPinModal = (tx: PinGatedTransaction) => {
+    setPinModalTx(tx);
+    setPinValue('');
+    setPinError(null);
+  };
+
+  const closePinModal = () => {
+    setPinModalTx(null);
+    setPinValue('');
+    setPinError(null);
+  };
+
+  const handleConfirmPin = async () => {
+    if (!pinModalTx || !admin || !tenant) return;
+    if (!/^\d{4,6}$/.test(pinValue)) {
+      setPinError('Enter your 4-6 digit PIN.');
+      return;
+    }
+    setPinSubmitting(true);
+    setPinError(null);
+    try {
+      // SECURITY: PIN verification happens server-side, never in this
+      // component. This Edge Function must: look up the calling admin's
+      // stored PIN (hashed, e.g. bcrypt), compare it in constant time, and
+      // — only on success — itself update the transaction to
+      // status: 'completed', pin_confirmed_at: now(), completed_at: now().
+      // The client never sees or sets the "correct" PIN, and never marks
+      // the transaction complete directly; it only reports the function's
+      // result. If this function doesn't exist yet, this call will fail
+      // until you deploy it.
+      const { data, error: fnError } = await supabase.functions.invoke('verify-transfer-pin', {
+        body: { transaction_id: pinModalTx.id, pin: pinValue },
+      });
+      if (fnError) throw fnError;
+      if (!data?.success) throw new Error(data?.message || 'Incorrect PIN. Please try again.');
+
+      await loadData();
+      closePinModal();
+    } catch (err) {
+      console.error('Error confirming PIN:', err);
+      setPinError(err instanceof Error ? err.message : 'Failed to confirm PIN');
+    } finally {
+      setPinSubmitting(false);
+    }
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
@@ -958,13 +1047,23 @@ export function TransactionsPage({ defaultType }: TransactionsPageProps = {}) {
         throw new Error('Recipient phone number is required.');
       }
 
-      // --- Universal float / wallet-pool verification -------------------
-      // Every transaction now settles against the branch float pool. Debit
-      // types must have sufficient balance BEFORE we allow the transaction
-      // to be created; credit types just need a target float account on
-      // record for traceability.
+      // --- Universal float / wallet-pool pre-check (advisory only) --------
+      // This is a fast, friendly check using whatever balance was last
+      // fetched into the page — it can give an early "insufficient balance"
+      // message without a round trip. It is NOT the authoritative check:
+      // that happens row-locked and atomic inside process_transaction /
+      // finalize_transaction on the database side (see the .sql files),
+      // which is what actually prevents two concurrent transactions from
+      // overdrawing the same float account. Never rely on this client-side
+      // check alone for correctness.
       const isDebit = FLOAT_DEBIT_TYPES.includes(type);
-      const isCredit = FLOAT_CREDIT_TYPES.includes(type);
+      // Defensive: every transaction type must be classified as either
+      // debiting or crediting the float pool. If this ever fires, a new
+      // TransactionType was added without updating FLOAT_DEBIT_TYPES /
+      // FLOAT_CREDIT_TYPES above.
+      if (!isDebit && !FLOAT_CREDIT_TYPES.includes(type)) {
+        throw new Error(`Transaction type "${type}" is not configured to affect the float pool. Contact support.`);
+      }
 
       if (!formData.float_account_id) {
         throw new Error(
@@ -989,11 +1088,17 @@ export function TransactionsPage({ defaultType }: TransactionsPageProps = {}) {
         }
       }
 
-      const requiredRole = resolveRequiredRole(formData.amount, formData.is_international);
+      const requiredRole = resolveRequiredRole(formData.amount, formData.is_international, type, admin.role);
       const requiresApproval = requiredRole !== null;
       // Compliance sign-off (international) is treated as the higher tier;
       // a plain large-amount branch-manager approval is level 1.
       const approvalLevel = requiredRole === 'compliance_officer' ? 2 : requiresApproval ? 1 : 0;
+
+      // Transfers that needed approval also require the initiating cashier
+      // to confirm with their PIN after the manager signs off, before the
+      // transfer actually executes. This column (and pin_confirmed_at) must
+      // exist on `transactions` — see the PIN confirmation panel below.
+      const requiresPinConfirmation = isTransfer && requiresApproval;
 
       // Resolve which wallet ids get written, per type. Note the branch float
       // account is NOT a customer wallet (separate `float_accounts` table);
@@ -1015,54 +1120,116 @@ export function TransactionsPage({ defaultType }: TransactionsPageProps = {}) {
 
       const feeAmount = isTransfer ? transferFee : 0;
 
-      const { data: insertedTx, error: insertError } = await supabase
-        .from('transactions')
-        .insert({
-          tenant_id: tenant.id,
-          branch_id: branch?.id || null,
-          transaction_type: type,
-          amount: formData.amount,
-          currency: formData.currency,
-          to_currency: isTransfer || isForex ? formData.to_currency : null,
-          fee_amount: feeAmount,
-          fee_currency: isTransfer ? formData.currency : null,
-          charges: isTransfer ? feeAmount : null,
-          from_customer_id: isFloatTopUp ? null : formData.from_customer_id || null,
-          to_customer_id: isTransfer ? formData.to_customer_id || null : null,
-          from_wallet_id: fromWalletId,
-          to_wallet_id: toWalletId,
-          sender_name: formData.sender_name || null,
-          sender_phone: formData.sender_phone || null,
-          receiver_name: isTransfer ? formData.receiver_name || null : null,
-          receiver_phone: isTransfer ? formData.receiver_phone || null : null,
-          destination_country: isTransfer ? formData.destination_country || null : null,
-          is_international: isTransfer ? formData.is_international : false,
-          requires_compliance_check: isTransfer ? formData.is_international : false,
-          payment_source:
-            type === 'deposit' || type === 'withdrawal' || isFloatTopUp ? formData.payment_source || null : null,
-          exchange_rate: isTransfer || isForex ? formData.exchange_rate || null : null,
-          float_account_id: formData.float_account_id,
-          loan_account_id: isLoan ? formData.loan_account_id || null : null,
-          approval_reference: isLoan ? formData.approval_reference || null : null,
-          purpose: formData.purpose || null,
-          notes: formData.notes || null,
-          status: (requiresApproval ? 'pending' : 'approved') as Transaction['status'],
-          created_by: admin.id,
-          required_approval_level: approvalLevel,
-        } as never)
-        .select()
-        .single();
+      // The amount actually charged against the float pool: forex uses the
+      // converted "amount received" leg; transfers add the fee on top of
+      // the principal; everything else is just the principal.
+      const floatImpactAmount = isForex ? amountReceived : formData.amount + feeAmount;
 
-      if (insertError) throw insertError;
+      let insertedTx: Transaction;
+      let executedFloatBalanceAfter: number | null = null;
+
+      if (!requiresApproval) {
+        // No approval gate: money moves right now, atomically, via the
+        // Postgres function (see process_transaction.sql) — it locks the
+        // float account (and any affected wallet) row, verifies balance,
+        // deducts/credits, and inserts the transaction record all in one
+        // database transaction. This requires that SQL function to be
+        // deployed in Supabase; if it hasn't been yet, this call will fail
+        // with a clear "function does not exist" error rather than silently
+        // falling back to the old no-op behavior.
+        const { data: rpcResult, error: rpcError } = await supabase.rpc('process_transaction', {
+          p_tenant_id: tenant.id,
+          p_branch_id: branch?.id || null,
+          p_transaction_type: type,
+          p_amount: formData.amount,
+          p_currency: formData.currency,
+          p_to_currency: isTransfer || isForex ? formData.to_currency : null,
+          p_fee_amount: feeAmount,
+          p_fee_currency: isTransfer ? formData.currency : null,
+          p_charges: isTransfer ? feeAmount : null,
+          p_from_customer_id: isFloatTopUp ? null : formData.from_customer_id || null,
+          p_to_customer_id: isTransfer ? formData.to_customer_id || null : null,
+          p_from_wallet_id: fromWalletId,
+          p_to_wallet_id: toWalletId,
+          p_sender_name: null,
+          p_sender_phone: null,
+          p_receiver_name: isTransfer ? formData.receiver_name || null : null,
+          p_receiver_phone: isTransfer ? formData.receiver_phone || null : null,
+          p_destination_country: isTransfer ? formData.destination_country || null : null,
+          p_is_international: isTransfer ? formData.is_international : false,
+          p_requires_compliance_check: false,
+          p_payment_source:
+            type === 'deposit' || type === 'withdrawal' || isFloatTopUp ? formData.payment_source || null : null,
+          p_exchange_rate: isTransfer || isForex ? formData.exchange_rate || null : null,
+          p_float_account_id: formData.float_account_id,
+          p_loan_account_id: isLoan ? formData.loan_account_id || null : null,
+          p_status: 'approved',
+          p_created_by: admin.id,
+          p_required_approval_level: 0,
+          p_requires_pin_confirmation: false,
+          p_float_impact_amount: floatImpactAmount,
+        });
+        if (rpcError) throw rpcError;
+        insertedTx = { id: rpcResult.transaction_id, reference: rpcResult.reference } as Transaction;
+        executedFloatBalanceAfter =
+          typeof rpcResult.float_balance_after === 'number' ? rpcResult.float_balance_after : null;
+      } else {
+        // Needs approval (and possibly PIN confirmation after that): record
+        // the transaction as 'pending' WITHOUT touching any balance. Money
+        // only moves once it's actually approved — see finalize_transaction.sql,
+        // called from ApprovalsPage when the last approval level clears (and
+        // from the PIN-verification step for transfers that need both).
+        const { data: pendingTx, error: insertError } = await supabase
+          .from('transactions')
+          .insert({
+            tenant_id: tenant.id,
+            branch_id: branch?.id || null,
+            transaction_type: type,
+            amount: formData.amount,
+            currency: formData.currency,
+            to_currency: isTransfer || isForex ? formData.to_currency : null,
+            fee_amount: feeAmount,
+            fee_currency: isTransfer ? formData.currency : null,
+            charges: isTransfer ? feeAmount : null,
+            from_customer_id: isFloatTopUp ? null : formData.from_customer_id || null,
+            to_customer_id: isTransfer ? formData.to_customer_id || null : null,
+            from_wallet_id: fromWalletId,
+            to_wallet_id: toWalletId,
+            sender_name: null,
+            sender_phone: null,
+            receiver_name: isTransfer ? formData.receiver_name || null : null,
+            receiver_phone: isTransfer ? formData.receiver_phone || null : null,
+            destination_country: isTransfer ? formData.destination_country || null : null,
+            is_international: isTransfer ? formData.is_international : false,
+            requires_compliance_check: isTransfer ? formData.is_international : false,
+            payment_source:
+              type === 'deposit' || type === 'withdrawal' || isFloatTopUp ? formData.payment_source || null : null,
+            exchange_rate: isTransfer || isForex ? formData.exchange_rate || null : null,
+            float_account_id: formData.float_account_id,
+            loan_account_id: isLoan ? formData.loan_account_id || null : null,
+            approval_reference: null,
+            purpose: null,
+            notes: null,
+            status: 'pending' as Transaction['status'],
+            created_by: admin.id,
+            required_approval_level: approvalLevel,
+            requires_pin_confirmation: requiresPinConfirmation,
+            pin_confirmed_at: null,
+          } as never)
+          .select()
+          .single();
+        if (insertError) throw insertError;
+        insertedTx = pendingTx as Transaction;
+      }
 
       // Route the transaction to whoever actually has to sign off on it -
       // without this, transactions sat as `status: 'pending'` with no
       // corresponding approval record, so nothing showed up on the Pending
       // Approvals page and nobody was ever notified.
-      if (requiresApproval && insertedTx && requiredRole) {
+      if (requiresApproval && requiredRole) {
         const { error: approvalError } = await supabase.from('transaction_approvals').insert({
           tenant_id: tenant.id,
-          transaction_id: (insertedTx as Transaction).id,
+          transaction_id: insertedTx.id,
           required_role: requiredRole,
           approval_level: approvalLevel,
           status: 'pending' as const,
@@ -1088,6 +1255,58 @@ export function TransactionsPage({ defaultType }: TransactionsPageProps = {}) {
 
       await loadData();
       setShowForm(false);
+
+      // Only an immediately-executed transaction gets an auto-receipt —
+      // showing "Transaction Complete" for something still pending approval
+      // would be actively misleading, since no balance has moved yet for
+      // that case. Approved-later / PIN-confirmed transactions don't get an
+      // automatic receipt here; add the same buildReceiptData() call at the
+      // point they actually finalize (ApprovalsPage / the PIN Edge Function)
+      // if you want one there too.
+      if (!requiresApproval) {
+        const selectedWallet = fromWallets.find((w) => w.id === formData.from_wallet_id);
+        const senderCustomer = customers.find((c) => c.id === formData.from_customer_id);
+        setReceiptData(
+          buildReceiptData({
+            institutionName: (tenant as { name?: string } | null)?.name || 'Institution',
+            institutionLogoUrl: (tenant as { logo_url?: string } | null)?.logo_url || null,
+            branchName: branch?.name || null,
+            transactionId: insertedTx.id,
+            reference: insertedTx.reference,
+            transactionType: type,
+            status: 'Completed',
+            createdAtIso: new Date().toISOString(),
+            customerName: isTransfer
+              ? senderCustomer
+                ? customerLabel(senderCustomer)
+                : null
+              : senderCustomer
+              ? customerLabel(senderCustomer)
+              : null,
+            customerAccountNumber: selectedWallet?.account_number || null,
+            senderName: isTransfer ? (senderCustomer ? customerLabel(senderCustomer) : null) : null,
+            senderPhone: isTransfer ? senderCustomer?.phone || null : null,
+            receiverName: isTransfer ? formData.receiver_name || null : null,
+            receiverPhone: isTransfer ? formData.receiver_phone || null : null,
+            amount: formData.amount,
+            currency: formData.currency,
+            chargesAmount: feeAmount || null,
+            chargesCurrency: isTransfer ? formData.currency : null,
+            exchangeRate: isTransfer || isForex ? formData.exchange_rate || null : null,
+            toCurrency: isTransfer || isForex ? formData.to_currency : null,
+            amountReceived: isForex ? amountReceived : isTransfer ? transferRecipientReceives : null,
+            remainingFloatBalance: executedFloatBalanceAfter,
+            remainingFloatCurrency: floatCurrency,
+            // Wallet balance-after isn't returned by the RPC yet (it only
+            // reports the float snapshot) — omitted here rather than shown
+            // stale. Extend process_transaction.sql to also return the
+            // affected wallet's new balance if you want this on receipts too.
+            remainingWalletBalance: null,
+            cashierName: (admin as { full_name?: string; email?: string } | null)?.full_name || admin?.email || 'Staff',
+          })
+        );
+      }
+
       resetForm();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create transaction');
@@ -1104,9 +1323,76 @@ export function TransactionsPage({ defaultType }: TransactionsPageProps = {}) {
     setError(null);
   };
 
-  const setType = (type: TransactionType) => {
-    setFormData({ ...emptyFormData(type), transaction_type: type });
+  // Opens the New Transaction modal already set to a specific type — the
+  // direct entry point from the quick-action buttons on the page, skipping
+  // the old in-modal "pick a type first" step entirely.
+  const startTransaction = (type: TransactionType) => {
+    setFormData(emptyFormData(type));
+    setFromWallets([]);
+    setLoanAccounts([]);
     setRateManuallyEdited(false);
+    setError(null);
+    setShowForm(true);
+  };
+
+  // Rebuilds a receipt from a stored transaction row for "Reprint". Uses
+  // whatever the row itself has (sender/receiver names, the float balance
+  // snapshot on transactions created after this feature shipped) — older
+  // rows created before float_balance_after existed will just show that
+  // section blank rather than a wrong number. The original cashier's name
+  // isn't resolved here (would need an admins list this page doesn't load)
+  // and is intentionally left blank rather than showing whoever is
+  // currently logged in, which would misattribute the transaction.
+  const openReceiptForTransaction = (tx: Transaction) => {
+    setReprintingId(tx.id);
+    try {
+      const fromCustomer = customers.find((c) => c.id === tx.from_customer_id);
+      const toCustomer = customers.find((c) => c.id === tx.to_customer_id);
+      const isTransferRow = tx.transaction_type === 'transfer';
+      const netAfterFee = Math.max(tx.amount - (tx.fee_amount || 0), 0);
+      const amountReceivedForRow =
+        tx.exchange_rate && tx.exchange_rate > 0 ? netAfterFee * tx.exchange_rate : null;
+
+      setReceiptData(
+        buildReceiptData({
+          institutionName: (tenant as { name?: string } | null)?.name || 'Institution',
+          institutionLogoUrl: (tenant as { logo_url?: string } | null)?.logo_url || null,
+          branchName: branch?.name || null,
+          transactionId: tx.id,
+          reference: tx.reference,
+          transactionType: tx.transaction_type,
+          status: tx.status === 'completed' ? 'Completed' : 'Approved',
+          createdAtIso: tx.created_at,
+          customerName: isTransferRow
+            ? fromCustomer
+              ? customerLabel(fromCustomer)
+              : null
+            : fromCustomer
+            ? customerLabel(fromCustomer)
+            : toCustomer
+            ? customerLabel(toCustomer)
+            : null,
+          customerAccountNumber: null,
+          senderName: tx.sender_name || (fromCustomer ? customerLabel(fromCustomer) : null),
+          senderPhone: tx.sender_phone,
+          receiverName: tx.receiver_name || (toCustomer ? customerLabel(toCustomer) : null),
+          receiverPhone: tx.receiver_phone,
+          amount: tx.amount,
+          currency: tx.currency,
+          chargesAmount: tx.fee_amount,
+          chargesCurrency: tx.fee_currency,
+          exchangeRate: tx.exchange_rate,
+          toCurrency: tx.to_currency,
+          amountReceived: amountReceivedForRow,
+          remainingFloatBalance: (tx as { float_balance_after?: number | null }).float_balance_after ?? null,
+          remainingFloatCurrency: tx.currency,
+          remainingWalletBalance: null,
+          cashierName: null,
+        })
+      );
+    } finally {
+      setReprintingId(null);
+    }
   };
 
   // --- Presentation helpers --------------------------------------------------
@@ -1492,20 +1778,9 @@ export function TransactionsPage({ defaultType }: TransactionsPageProps = {}) {
                 <CurrencySelect value={formData.currency} onChange={(v) => setFormData((prev) => ({ ...prev, currency: v }))} />
               </Field>
             </div>
-            <div className="grid sm:grid-cols-2 gap-4">
-              <Field label="Amount" required hint={approvalHint}>
-                <AmountInput value={formData.amount} onChange={(v) => setFormData((prev) => ({ ...prev, amount: v }))} />
-              </Field>
-              <Field label="Approval Reference">
-                <input
-                  type="text"
-                  value={formData.approval_reference}
-                  onChange={(e) => setFormData((prev) => ({ ...prev, approval_reference: e.target.value }))}
-                  placeholder="Enter approval reference..."
-                  className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#1ebcb2] focus:border-transparent"
-                />
-              </Field>
-            </div>
+            <Field label="Amount" required hint={approvalHint}>
+              <AmountInput value={formData.amount} onChange={(v) => setFormData((prev) => ({ ...prev, amount: v }))} />
+            </Field>
             {renderFloatField()}
           </>
         );
@@ -1584,11 +1859,7 @@ export function TransactionsPage({ defaultType }: TransactionsPageProps = {}) {
     }
   };
 
-  const activeQuickType = QUICK_TYPES.find((t) => t.value === formData.transaction_type);
-  // Only Withdrawal still uses the free-text "External Party" block for
-  // supplementary sender info — Transfer now captures recipient details
-  // inline (phone lookup) as part of Section 2 above.
-  const showExternalParty = formData.transaction_type === 'withdrawal';
+  const activeTypeConfig = TRANSACTION_TYPES.find((t) => t.value === formData.transaction_type);
 
   // ============================================================================
   // Render
@@ -1597,22 +1868,70 @@ export function TransactionsPage({ defaultType }: TransactionsPageProps = {}) {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold text-[#641f60]">Transactions</h1>
-          <p className="text-slate-600 mt-1">Process deposits, withdrawals, transfers, and more</p>
-        </div>
-        <button
-          onClick={() => {
-            resetForm();
-            setShowForm(true);
-          }}
-          className="inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-[#ee7b22] hover:bg-[#c46040] text-white font-medium rounded-lg shadow-lg transition-all w-full sm:w-auto"
-        >
-          <Plus className="w-5 h-5" />
-          New Transaction
-        </button>
+      <div>
+        <h1 className="text-2xl font-bold text-[#641f60]">Transactions</h1>
+        <p className="text-slate-600 mt-1">Process deposits, withdrawals, transfers, and more</p>
       </div>
+
+      {/* Quick actions — pick the type directly, no separate "select type"
+          step inside a modal. */}
+      <div className="bg-white rounded-xl border border-slate-200 p-4 sm:p-5">
+        <p className="text-sm font-medium text-slate-500 mb-3">New Transaction</p>
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2 sm:gap-3">
+          {TRANSACTION_TYPES.map((t) => (
+            <button
+              key={t.value}
+              type="button"
+              onClick={() => startTransaction(t.value)}
+              className="flex flex-col items-center gap-2 p-3 sm:p-4 rounded-xl border-2 border-slate-200 hover:border-[#1ebcb2] hover:bg-[#1ebcb2]/5 transition-all text-center"
+            >
+              <span className="w-10 h-10 rounded-lg bg-[#1ebcb2]/10 text-[#641f60] flex items-center justify-center flex-shrink-0">
+                {t.icon}
+              </span>
+              <span className="text-xs sm:text-sm font-medium text-slate-700 leading-tight">{t.label}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Awaiting PIN confirmation — transfers this cashier created that a
+          manager has already approved. Nothing here executes until the PIN
+          is confirmed server-side. */}
+      {myPinConfirmations.length > 0 && (
+        <div className="bg-[#641f60]/5 border border-[#641f60]/20 rounded-xl overflow-hidden">
+          <div className="px-4 sm:px-6 py-3 border-b border-[#641f60]/10 flex items-center gap-2">
+            <ShieldCheck className="w-5 h-5 text-[#641f60]" />
+            <h2 className="font-semibold text-[#641f60]">
+              Awaiting Your PIN Confirmation ({myPinConfirmations.length})
+            </h2>
+          </div>
+          <div className="divide-y divide-[#641f60]/10">
+            {myPinConfirmations.map((tx) => (
+              <div
+                key={tx.id}
+                className="px-4 sm:px-6 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+              >
+                <div className="min-w-0">
+                  <p className="font-medium text-slate-900 truncate">
+                    Transfer to {tx.receiver_name || 'recipient'} &middot; {tx.currency}{' '}
+                    {tx.amount.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                  </p>
+                  <p className="text-xs text-slate-500">
+                    Approved by manager &middot; {tx.reference}
+                  </p>
+                </div>
+                <button
+                  onClick={() => openPinModal(tx)}
+                  className="inline-flex items-center justify-center gap-2 px-4 py-2 bg-[#641f60] hover:bg-[#4a1646] text-white text-sm font-medium rounded-lg transition-colors shrink-0"
+                >
+                  <KeyRound className="w-4 h-4" />
+                  Enter PIN to Complete
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Filters */}
       <div className="bg-white rounded-xl border border-slate-200 p-4">
@@ -1718,6 +2037,20 @@ export function TransactionsPage({ defaultType }: TransactionsPageProps = {}) {
                       </p>
                     ) : null}
                     <p className="text-xs text-slate-500">{new Date(tx.created_at).toLocaleString()}</p>
+                    {(tx.status === 'completed' || tx.status === 'approved') && (
+                      <button
+                        onClick={() => openReceiptForTransaction(tx)}
+                        disabled={reprintingId === tx.id}
+                        className="mt-1.5 inline-flex items-center gap-1 text-xs font-medium text-[#641f60] hover:underline disabled:opacity-50"
+                      >
+                        {reprintingId === tx.id ? (
+                          <Loader2 className="w-3 h-3 animate-spin" />
+                        ) : (
+                          <Receipt className="w-3 h-3" />
+                        )}
+                        Reprint
+                      </button>
+                    )}
                   </div>
                 </div>
               </div>
@@ -1744,7 +2077,10 @@ export function TransactionsPage({ defaultType }: TransactionsPageProps = {}) {
           <div className="bg-white w-full sm:max-w-2xl sm:rounded-2xl shadow-2xl flex flex-col h-full sm:h-auto sm:max-h-[90vh] overflow-hidden">
             {/* Fixed header */}
             <div className="px-4 sm:px-6 py-4 border-b border-slate-200 flex items-center justify-between flex-shrink-0">
-              <h2 className="text-lg sm:text-xl font-bold text-[#641f60]">New Transaction</h2>
+              <h2 className="text-lg sm:text-xl font-bold text-[#641f60] flex items-center gap-2">
+                {activeTypeConfig?.icon}
+                New {activeTypeConfig?.label || 'Transaction'}
+              </h2>
               <button
                 type="button"
                 onClick={() => setShowForm(false)}
@@ -1761,116 +2097,13 @@ export function TransactionsPage({ defaultType }: TransactionsPageProps = {}) {
               onSubmit={handleSubmit}
               className="flex-1 overflow-y-auto overscroll-contain px-4 sm:px-6 py-5 space-y-6"
             >
-              {/* Section 1: Transaction Type */}
-              <div>
-                <label className="block text-sm font-medium text-slate-700 mb-2">1. Select Transaction Type</label>
-                <div className="grid grid-cols-2 md:grid-cols-3 gap-2 sm:gap-3">
-                  {QUICK_TYPES.map((t) => (
-                    <button
-                      key={t.value}
-                      type="button"
-                      onClick={() => setType(t.value)}
-                      className={`flex flex-col items-start gap-1.5 p-3 rounded-lg border-2 text-left transition-all min-h-[76px] ${
-                        formData.transaction_type === t.value
-                          ? 'border-[#1ebcb2] bg-[#1ebcb2]/10'
-                          : 'border-slate-200 hover:border-slate-300'
-                      }`}
-                    >
-                      <span className={formData.transaction_type === t.value ? 'text-[#641f60]' : 'text-slate-500'}>
-                        {t.icon}
-                      </span>
-                      <span className="block text-xs sm:text-sm font-medium text-slate-700 leading-tight">
-                        {t.label}
-                      </span>
-                    </button>
-                  ))}
-                </div>
-                <div className="mt-2">
-                  <select
-                    value={TRANSACTION_TYPES.some((t) => t.value === formData.transaction_type) ? formData.transaction_type : ''}
-                    onChange={(e) => setType(e.target.value as TransactionType)}
-                    className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg text-slate-600 focus:outline-none focus:ring-2 focus:ring-[#1ebcb2]"
-                  >
-                    {TRANSACTION_TYPES.map((t) => (
-                      <option key={t.value} value={t.value}>
-                        {t.label}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-
-              {/* Section 2: dynamic fields */}
-              <div className="border-t border-slate-200 pt-5 space-y-4">
+              <div className="space-y-4">
                 <h3 className="text-sm font-semibold text-slate-500 uppercase tracking-wide flex items-center gap-2">
                   <WalletIcon className="w-4 h-4" />
-                  2. Transaction Details {activeQuickType ? `(${activeQuickType.label})` : ''}
+                  Transaction Details
                 </h3>
                 {renderTypeFields()}
               </div>
-
-              {/* External Party (withdrawal only — transfer captures this inline above) */}
-              {showExternalParty && (
-                <div className="border-t border-slate-200 pt-4 space-y-4">
-                  <h3 className="font-semibold text-slate-900 flex items-center gap-2">
-                    <User className="w-5 h-5 text-[#641f60]" />
-                    External Party (Optional)
-                  </h3>
-                  <div className="grid sm:grid-cols-2 gap-4">
-                    <Field label="Sender Name">
-                      <input
-                        type="text"
-                        value={formData.sender_name}
-                        onChange={(e) => setFormData((prev) => ({ ...prev, sender_name: e.target.value }))}
-                        className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#1ebcb2] focus:border-transparent"
-                      />
-                    </Field>
-                    <Field label="Sender Phone">
-                      <div className="relative">
-                        <Phone className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400" />
-                        <input
-                          type="tel"
-                          value={formData.sender_phone}
-                          onChange={(e) => setFormData((prev) => ({ ...prev, sender_phone: e.target.value }))}
-                          className="w-full pl-10 pr-4 py-2.5 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#1ebcb2] focus:border-transparent"
-                        />
-                      </div>
-                    </Field>
-                  </div>
-                  <div className="grid sm:grid-cols-2 gap-4">
-                    <Field label="Receiver Name">
-                      <input
-                        type="text"
-                        value={formData.receiver_name}
-                        onChange={(e) => setFormData((prev) => ({ ...prev, receiver_name: e.target.value }))}
-                        className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#1ebcb2] focus:border-transparent"
-                      />
-                    </Field>
-                    <Field label="Receiver Phone">
-                      <div className="relative">
-                        <Phone className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400" />
-                        <input
-                          type="tel"
-                          value={formData.receiver_phone}
-                          onChange={(e) => setFormData((prev) => ({ ...prev, receiver_phone: e.target.value }))}
-                          className="w-full pl-10 pr-4 py-2.5 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#1ebcb2] focus:border-transparent"
-                        />
-                      </div>
-                    </Field>
-                  </div>
-                </div>
-              )}
-
-              {/* Notes */}
-              <Field label="Notes">
-                <textarea
-                  value={formData.notes}
-                  onChange={(e) => setFormData((prev) => ({ ...prev, notes: e.target.value }))}
-                  rows={2}
-                  className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#1ebcb2] focus:border-transparent"
-                  placeholder="Add any additional notes..."
-                />
-              </Field>
 
               {error && (
                 <div className="p-3 bg-[#c46040]/10 border border-[#c46040]/30 rounded-lg text-[#c46040] text-sm flex items-center gap-2">
@@ -1903,7 +2136,7 @@ export function TransactionsPage({ defaultType }: TransactionsPageProps = {}) {
                 ) : (
                   <>
                     <Plus className="w-5 h-5" />
-                    Create {activeQuickType ? activeQuickType.label : 'Transaction'}
+                    Create {activeTypeConfig ? activeTypeConfig.label : 'Transaction'}
                   </>
                 )}
               </button>
@@ -1911,6 +2144,66 @@ export function TransactionsPage({ defaultType }: TransactionsPageProps = {}) {
           </div>
         </div>
       )}
+
+      {/* PIN confirmation modal — the final step before an approved transfer
+          actually executes. The PIN itself is never checked here; this only
+          calls the server-side verification function and reflects its
+          result. */}
+      {pinModalTx && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-sm w-full p-6">
+            <div className="w-12 h-12 rounded-full bg-[#641f60]/10 flex items-center justify-center mb-4">
+              <KeyRound className="w-6 h-6 text-[#641f60]" />
+            </div>
+            <h2 className="text-lg font-bold text-[#641f60] mb-1">Confirm Transfer</h2>
+            <p className="text-sm text-slate-600 mb-4">
+              {pinModalTx.currency} {pinModalTx.amount.toLocaleString(undefined, { minimumFractionDigits: 2 })} to{' '}
+              {pinModalTx.receiver_name || 'recipient'} was approved by your manager. Enter your PIN to send it.
+            </p>
+            <label className="block text-sm font-medium text-slate-700 mb-1">PIN</label>
+            <input
+              type="password"
+              inputMode="numeric"
+              autoComplete="off"
+              maxLength={6}
+              value={pinValue}
+              onChange={(e) => setPinValue(e.target.value.replace(/\D/g, ''))}
+              placeholder="••••"
+              autoFocus
+              className="w-full px-4 py-3 text-center text-xl tracking-[0.5em] border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#641f60] focus:border-transparent"
+            />
+            {pinError && (
+              <p className="mt-2 text-sm text-[#c46040] flex items-center gap-1.5">
+                <AlertCircle className="w-4 h-4 flex-shrink-0" />
+                {pinError}
+              </p>
+            )}
+            <div className="flex items-center justify-end gap-3 mt-5">
+              <button
+                type="button"
+                onClick={closePinModal}
+                disabled={pinSubmitting}
+                className="px-4 py-2.5 border border-slate-300 text-slate-700 font-medium rounded-lg hover:bg-slate-50 transition-colors disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmPin}
+                disabled={pinSubmitting || pinValue.length < 4}
+                className="px-6 py-2.5 bg-[#641f60] hover:bg-[#4a1646] text-white font-medium rounded-lg shadow-lg disabled:opacity-50 flex items-center gap-2 transition-all"
+              >
+                {pinSubmitting ? <Loader2 className="w-5 h-5 animate-spin" /> : <ShieldCheck className="w-5 h-5" />}
+                Confirm &amp; Send
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Receipt — auto-opens after an immediate transaction, or reopened
+          via "Reprint" on any past transaction. */}
+      {receiptData && <ReceiptModal data={receiptData} onClose={() => setReceiptData(null)} />}
     </div>
   );
 }
