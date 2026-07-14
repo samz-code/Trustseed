@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { X } from 'lucide-react';
 
-const WHATSAPP_NUMBER = '211989333231'; // +211 989 333 231, digits only for wa.me
+const WHATSAPP_NUMBER = '+211927094644'; // +211 989 333 231, digits only for wa.me
 const DEFAULT_MESSAGE = "Hi Trust Seed, I'd like to know more about the platform.";
 
 function WhatsAppIcon({ className }: { className?: string }) {
