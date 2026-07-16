@@ -3,6 +3,10 @@ import { supabase } from '../lib/supabase';
 import type { User, Session } from '@supabase/supabase-js';
 import type { Tenant, TenantAdmin, Branch } from '../types';
 import { applyBranding, resetBranding } from '../lib/branding';
+// [[RBAC]] permission loading
+import { fetchMyPermissions } from '../services/permission.service';
+import { WILDCARD } from '../constants/permissions';
+import { FULL_ACCESS_ROLES } from '../constants/roles';
 
 interface AuthContextType {
   user: User | null;
@@ -19,6 +23,13 @@ interface AuthContextType {
   needsPayment: boolean;
   pendingPlan: string | null;
   pendingInstitutionName: string | null;
+  // [[RBAC]] flat permission set for the signed-in user ('*' => full access),
+  // plus helpers. usePermissions() reads these.
+  permissions: string[];
+  permissionsLoading: boolean;
+  hasPermission: (permission: string) => boolean;
+  hasRole: (role: string) => boolean;
+  refreshPermissions: () => Promise<void>;
   signIn: (email: string, password: string) => Promise<void>;
   signUp: (
     email: string,
@@ -63,6 +74,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [needsPayment, setNeedsPayment] = useState(false);
   const [pendingPlan, setPendingPlan] = useState<string | null>(null);
   const [pendingInstitutionName, setPendingInstitutionName] = useState<string | null>(null);
+  // [[RBAC]] permission state
+  const [permissions, setPermissions] = useState<string[]>([]);
+  const [permissionsLoading, setPermissionsLoading] = useState(false);
 
   // Stable across renders: does not depend on `branch`, so it never forces
   // the auth-state-change effect below to re-subscribe when the user
@@ -87,6 +101,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setTenant(null);
         setAdmin(null);
         setBranches([]);
+        setPermissions([]); // [[RBAC]] no admin row -> no permissions
         applyTenantBranding(null);
 
         const meta = authUser.user_metadata as {
@@ -115,6 +130,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setPendingPlan(null);
       setPendingInstitutionName(null);
       setAdmin(adminData);
+
+      // [[RBAC]] Load this user's permission set (role -> permissions via RPC).
+      // Runs here so it stays in sync on initial session, auth-state-change,
+      // and refreshTenant() - all of which call loadUserTenant().
+      setPermissionsLoading(true);
+      const permResult = await fetchMyPermissions();
+      setPermissions(permResult.permissions);
+      if (permResult.error) console.warn('Permission load:', permResult.error);
+      setPermissionsLoading(false);
 
       const { data: tenantData, error: tenantError } = await supabase
         .from('tenants')
@@ -169,6 +193,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           setAdmin(null);
           setBranches([]);
           setBranch(null);
+          setPermissions([]); // [[RBAC]] clear on sign-out
           setNeedsPayment(false);
           setPendingPlan(null);
           setPendingInstitutionName(null);
@@ -264,6 +289,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setAdmin(null);
     setBranches([]);
     setBranch(null);
+    setPermissions([]); // [[RBAC]] clear on sign-out
     setNeedsPayment(false);
     setPendingPlan(null);
     setPendingInstitutionName(null);
@@ -277,6 +303,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setLoading(false);
     }
   }, [user, loadUserTenant]);
+
+  // [[RBAC]] Re-fetch permissions without a full tenant reload. Call this after
+  // an admin changes a user's role, so the change reflects without a re-login.
+  const refreshPermissions = useCallback(async () => {
+    if (!admin) {
+      setPermissions([]);
+      return;
+    }
+    setPermissionsLoading(true);
+    const result = await fetchMyPermissions();
+    setPermissions(result.permissions);
+    if (result.error) console.warn('Permission refresh:', result.error);
+    setPermissionsLoading(false);
+  }, [admin]);
 
   // Call once payment has actually succeeded (placeholder button today,
   // a payment-processor webhook confirmation later). Runs the atomic
@@ -308,6 +348,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     [user, loadUserTenant]
   );
 
+  // [[RBAC]] Convenience checks. Wildcard roles (super_admin/institution_admin)
+  // resolve to true even before the permission list arrives, matching the
+  // server-side has_permission() short-circuit.
+  const isWildcard =
+    permissions.includes(WILDCARD) ||
+    (!!admin?.role && (FULL_ACCESS_ROLES as string[]).includes(admin.role));
+
+  const hasPermission = useCallback(
+    (permission: string) => isWildcard || permissions.includes(permission),
+    [isWildcard, permissions]
+  );
+
+  const hasRole = useCallback((role: string) => admin?.role === role, [admin?.role]);
+
   const value: AuthContextType = {
     user,
     session,
@@ -320,6 +374,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     needsPayment,
     pendingPlan,
     pendingInstitutionName,
+    permissions, // [[RBAC]]
+    permissionsLoading, // [[RBAC]]
+    hasPermission, // [[RBAC]]
+    hasRole, // [[RBAC]]
+    refreshPermissions, // [[RBAC]]
     signIn,
     signUp,
     signOut,
