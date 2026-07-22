@@ -58,6 +58,54 @@ interface NotificationRow {
   read_at: string | null;
 }
 
+// ============================================================================
+// The bell merges two sources.
+//
+// `notifications` addresses staff: approvals waiting, system notices. These
+// have a read/unread state.
+//
+// `customer_notifications` is the outbound member message queue. These have a
+// delivery status instead. A queued message is the system working normally and
+// needs nobody's attention; a failed one means a member did not receive
+// confirmation of their money, which is exactly the kind of thing a SACCO
+// officer must chase.
+//
+// So the badge counts unread staff alerts plus failed member messages. The
+// list shows everything, merged by time, so the bell is a complete picture
+// rather than half of one.
+// ============================================================================
+
+interface CustomerMessageRow {
+  id: string;
+  customer_id: string | null;
+  event_key: string;
+  channel: 'sms' | 'email' | 'in_app';
+  recipient: string | null;
+  body: string;
+  status: 'queued' | 'sending' | 'sent' | 'failed' | 'skipped';
+  error_message: string | null;
+  created_at: string;
+}
+
+type FeedItem =
+  | { kind: 'staff'; id: string; created_at: string; row: NotificationRow }
+  | { kind: 'member'; id: string; created_at: string; row: CustomerMessageRow };
+
+const MEMBER_STATUS_STYLE: Record<CustomerMessageRow['status'], string> = {
+  queued: 'bg-slate-100 text-slate-500',
+  sending: 'bg-[#ee7b22]/15 text-[#c46040]',
+  sent: 'bg-[#1ebcb2]/15 text-[#159089]',
+  failed: 'bg-[#c46040]/15 text-[#c46040]',
+  skipped: 'bg-slate-100 text-slate-400',
+};
+
+function prettyEventKey(key: string): string {
+  return key
+    .split('_')
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(' ');
+}
+
 const navigationItems: NavItem[] = [
   {
     label: 'Dashboard',
@@ -137,6 +185,11 @@ const navigationItems: NavItem[] = [
     path: 'reports',
   },
   {
+    label: 'Notifications',
+    icon: <Bell className="w-5 h-5" />,
+    path: 'notifications',
+  },
+  {
     label: 'Users & Roles',
     icon: <UserCog className="w-5 h-5" />,
     path: 'users-roles',
@@ -151,6 +204,166 @@ const navigationItems: NavItem[] = [
 // Head-office-only navigation. Branch users never see these entries; the pages
 // themselves also gate access, so this is defense-in-depth for the menu.
 const HEAD_OFFICE_ROLES = new Set(['super_admin', 'institution_admin', 'head_office_admin']);
+
+// ============================================================================
+// Role-based navigation visibility
+// ----------------------------------------------------------------------------
+// An explicit role -> allowed-paths map, extending the same pattern already
+// used for HEAD_OFFICE_ROLES / Branch Performance above. Chosen over gating
+// on hasPermission() because it's unconfirmed whether the permissions table
+// has entries for pages like accounting.view or transactions.view yet — a
+// permission-driven gate would silently hide everything if those rows don't
+// exist. This map fails visibly (wrong role sees wrong thing) rather than
+// silently (everyone sees nothing), which is the safer default until the
+// permission set is confirmed populated.
+//
+// Paths refer to NavItem.path and NavChild.path values in navigationItems
+// above. A role not listed here (or an unrecognised role) falls back to
+// FULL_ACCESS_ROLES-style full visibility, matching how HEAD_OFFICE_ROLES
+// already treats admins.
+// ============================================================================
+
+const FULL_ACCESS_ROLES = new Set([
+  'super_admin',
+  'institution_admin',
+  'head_office_admin',
+  'branch_manager',
+]);
+
+// Branch managers get everything except the two institution-wide admin
+// pages; modelled as an exclusion rather than a duplicate inclusion list.
+const BRANCH_MANAGER_EXCLUDE = new Set(['users-roles', 'settings']);
+
+const ROLE_NAV_MAP: Record<string, Set<string>> = {
+  teller: new Set([
+    'dashboard',
+    'notifications',
+    'customers',
+    'wallets',
+    'transactions',
+    'transfers',
+    'forex',
+    'daily-opening',
+    'daily-closing',
+    'float',
+    'repayments',
+  ]),
+  cashier: new Set([
+    'dashboard',
+    'notifications',
+    'customers',
+    'wallets',
+    'transactions',
+    'transfers',
+    'daily-opening',
+    'daily-closing',
+    'float',
+  ]),
+  loan_officer: new Set([
+    'dashboard',
+    'notifications',
+    'customers',
+    'loan-products',
+    'loan-applications',
+    'loans',
+    'repayments',
+    'reports',
+  ]),
+  finance_officer: new Set([
+    'dashboard',
+    'notifications',
+    'chart-of-accounts',
+    'journals',
+    'ledger',
+    'trial-balance',
+    'expenses',
+    'reports',
+    'transactions',
+  ]),
+  accountant: new Set([
+    'dashboard',
+    'notifications',
+    'chart-of-accounts',
+    'journals',
+    'ledger',
+    'trial-balance',
+    'expenses',
+    'reports',
+    'transactions',
+  ]),
+  compliance_officer: new Set([
+    'dashboard',
+    'notifications',
+    'customers',
+    'transactions',
+    'approvals',
+    'reports',
+  ]),
+  forex_officer: new Set([
+    'dashboard',
+    'notifications',
+    'customers',
+    'wallets',
+    'transactions',
+    'transfers',
+    'forex',
+  ]),
+  customer_service: new Set([
+    'dashboard',
+    'notifications',
+    'customers',
+    'wallets',
+    'savings-products',
+    'savings-accounts',
+  ]),
+  auditor: new Set([
+    'dashboard',
+    'notifications',
+    'reports',
+    'chart-of-accounts',
+    'journals',
+    'ledger',
+    'trial-balance',
+    'transactions',
+  ]),
+};
+
+/**
+ * Filters a NavItem tree down to what a given role may see. A parent with
+ * children is kept only if it has a direct path the role can see OR at least
+ * one visible child; children are filtered the same way individually.
+ */
+function filterNavByRole(items: NavItem[], role: string | undefined): NavItem[] {
+  if (!role || FULL_ACCESS_ROLES.has(role)) {
+    if (role === 'branch_manager') {
+      return items
+        .filter((item) => !item.path || !BRANCH_MANAGER_EXCLUDE.has(item.path))
+        .map((item) => ({
+          ...item,
+          children: item.children?.filter((c) => !BRANCH_MANAGER_EXCLUDE.has(c.path)),
+        }));
+    }
+    return items;
+  }
+
+  const allowed = ROLE_NAV_MAP[role];
+  if (!allowed) {
+    // Unrecognised role: fail toward showing only Dashboard rather than
+    // either hiding everything or granting full access by accident.
+    return items.filter((item) => item.path === 'dashboard');
+  }
+
+  const result: NavItem[] = [];
+  for (const item of items) {
+    const children: NavChild[] | undefined = item.children?.filter((c) => allowed.has(c.path));
+    const hasOwnPath = item.path ? allowed.has(item.path) : false;
+    const hasVisibleChildren = !!children && children.length > 0;
+    if (!hasOwnPath && !hasVisibleChildren) continue;
+    result.push({ ...item, children: item.children ? children : undefined });
+  }
+  return result;
+}
+
 
 function timeAgo(iso: string): string {
   const diffMs = Date.now() - new Date(iso).getTime();
@@ -456,6 +669,7 @@ export function DashboardLayout({ children }: DashboardLayoutProps) {
 
   const [notifOpen, setNotifOpen] = useState(false);
   const [notifications, setNotifications] = useState<NotificationRow[]>([]);
+  const [memberMessages, setMemberMessages] = useState<CustomerMessageRow[]>([]);
   const [notifLoading, setNotifLoading] = useState(false);
   const [notifError, setNotifError] = useState<string | null>(null);
   const notifRef = useRef<HTMLDivElement>(null);
@@ -485,7 +699,33 @@ export function DashboardLayout({ children }: DashboardLayoutProps) {
   const [profileSubmitting, setProfileSubmitting] = useState(false);
   const [profileError, setProfileError] = useState<string | null>(null);
 
-  const unreadCount = notifications.filter((n) => !n.read_at).length;
+  // Unread staff alerts plus failed member messages. A queued or sent message
+  // is not a task, so it does not inflate the badge.
+  const unreadStaffCount = notifications.filter((n) => !n.read_at).length;
+  const failedMemberCount = memberMessages.filter((m) => m.status === 'failed').length;
+  const unreadCount = unreadStaffCount + failedMemberCount;
+
+  // Merged, newest first. Both sources are already limited server-side, so
+  // this sorts at most 40 items.
+  const feed: FeedItem[] = useMemo(() => {
+    const items: FeedItem[] = [
+      ...notifications.map((n) => ({
+        kind: 'staff' as const,
+        id: `staff-${n.id}`,
+        created_at: n.created_at,
+        row: n,
+      })),
+      ...memberMessages.map((m) => ({
+        kind: 'member' as const,
+        id: `member-${m.id}`,
+        created_at: m.created_at,
+        row: m,
+      })),
+    ];
+    return items.sort(
+      (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+    );
+  }, [notifications, memberMessages]);
 
   // Branch users see only their branch's menu; head office gets the extra
   // Branch Performance comparison view (inserted right after Reports).
@@ -500,7 +740,10 @@ export function DashboardLayout({ children }: DashboardLayoutProps) {
       const idx = items.findIndex((i) => i.path === 'reports');
       items.splice(idx >= 0 ? idx + 1 : items.length, 0, bp);
     }
-    return items;
+    // Role-based visibility, applied AFTER Branch Performance is inserted so
+    // head-office roles (which pass straight through filterNavByRole via
+    // FULL_ACCESS_ROLES) keep seeing it.
+    return filterNavByRole(items, admin?.role);
   }, [admin?.role]);
 
   // Fetch notifications for this tenant that are either tenant-wide
@@ -515,6 +758,14 @@ export function DashboardLayout({ children }: DashboardLayoutProps) {
     if (!tenant) return;
     setNotifLoading(true);
     setNotifError(null);
+
+    // The two fetches are deliberately independent. If the member message
+    // table is missing or blocked, staff alerts should still show, and the
+    // reverse. A single try/catch around both would blank the bell entirely
+    // whenever either one failed.
+    const errors: string[] = [];
+
+    // ---- Staff alerts -------------------------------------------------
     try {
       let query = supabase
         .from('notifications')
@@ -529,18 +780,48 @@ export function DashboardLayout({ children }: DashboardLayoutProps) {
       if (error) throw error;
       setNotifications(data ?? []);
     } catch (err) {
-      console.error('Error loading notifications:', err);
+      console.error('Error loading staff notifications:', err);
       const message = err instanceof Error ? err.message : 'Failed to load notifications';
-      // Surface a clearer hint for the most common setup issue.
       if (/relation .* does not exist/i.test(message) || (err as { code?: string })?.code === '42P01') {
-        setNotifError('The notifications table doesn’t exist yet in your database.');
+        errors.push('The notifications table does not exist yet.');
       } else {
-        setNotifError(message);
+        errors.push(message);
       }
       setNotifications([]);
-    } finally {
-      setNotifLoading(false);
     }
+
+    // ---- Member messages ----------------------------------------------
+    //
+    // Deliberately NOT filtered by the selected branch. Institution-wide
+    // messages carry no branch_id, and a branch filter silently hides them.
+    // The bell is a tenant-level summary; the full page provides filtering.
+    try {
+      const { data, error } = await (supabase.from('customer_notifications') as any)
+        .select('id, customer_id, event_key, channel, recipient, body, status, error_message, created_at')
+        .eq('tenant_id', tenant.id)
+        .order('created_at', { ascending: false })
+        .limit(20);
+
+      if (error) throw error;
+      setMemberMessages((data ?? []) as CustomerMessageRow[]);
+    } catch (err) {
+      console.error('Error loading member messages:', err);
+      const message = err instanceof Error ? err.message : 'Failed to load member messages';
+      if (/relation .* does not exist/i.test(message) || (err as { code?: string })?.code === '42P01') {
+        errors.push('Run the notification system migration to enable member messages.');
+      } else {
+        errors.push(message);
+      }
+      setMemberMessages([]);
+    }
+
+    // Only surface an error if BOTH failed. One working source is still a
+    // useful bell, and a warning over a populated list reads as broken.
+    if (errors.length === 2) {
+      setNotifError(errors.join(' '));
+    }
+
+    setNotifLoading(false);
   }, [tenant, admin?.id]);
 
   useEffect(() => {
@@ -884,7 +1165,10 @@ export function DashboardLayout({ children }: DashboardLayoutProps) {
                         >
                           <RefreshCw className={`w-3.5 h-3.5 ${notifLoading ? 'animate-spin' : ''}`} />
                         </button>
-                        {unreadCount > 0 && (
+                        {/* Only staff alerts have a read state; member
+                            messages are cleared by fixing the delivery, not
+                            by dismissing them. */}
+                        {unreadStaffCount > 0 && (
                           <button
                             onClick={markAllAsRead}
                             className="text-xs text-[#1ebcb2] hover:text-[#641f60] font-medium flex items-center gap-1 transition-colors"
@@ -920,38 +1204,110 @@ export function DashboardLayout({ children }: DashboardLayoutProps) {
                             Retry
                           </button>
                         </div>
-                      ) : notifications.length === 0 ? (
+                      ) : feed.length === 0 ? (
                         <div className="py-10 text-center px-4">
                           <Inbox className="w-8 h-8 text-slate-300 mx-auto mb-2" />
                           <p className="text-sm text-slate-500">No notifications yet</p>
                         </div>
                       ) : (
                         <ul className="divide-y divide-slate-100">
-                          {notifications.map((n) => (
-                            <li key={n.id}>
-                              <button
-                                onClick={() => markAsRead(n.id)}
-                                className={`w-full text-left px-4 py-3 hover:bg-slate-50 transition-colors ${
-                                  !n.read_at ? 'bg-[#1ebcb2]/5' : ''
-                                }`}
-                              >
-                                <div className="flex items-start gap-2">
-                                  {!n.read_at && (
-                                    <span className="mt-1.5 w-1.5 h-1.5 rounded-full bg-[#ee7b22] flex-shrink-0" />
-                                  )}
-                                  <div className="min-w-0 flex-1">
-                                    <p className="text-sm font-medium text-slate-900 truncate">{n.title}</p>
-                                    {n.message && (
-                                      <p className="text-xs text-slate-500 mt-0.5 line-clamp-2">{n.message}</p>
+                          {feed.map((item) =>
+                            item.kind === 'staff' ? (
+                              <li key={item.id}>
+                                <button
+                                  onClick={() => markAsRead(item.row.id)}
+                                  className={`w-full text-left px-4 py-3 hover:bg-slate-50 transition-colors ${
+                                    !item.row.read_at ? 'bg-[#1ebcb2]/5' : ''
+                                  }`}
+                                >
+                                  <div className="flex items-start gap-2">
+                                    {!item.row.read_at && (
+                                      <span className="mt-1.5 w-1.5 h-1.5 rounded-full bg-[#ee7b22] flex-shrink-0" />
                                     )}
-                                    <p className="text-xs text-slate-400 mt-1">{timeAgo(n.created_at)}</p>
+                                    <div className="min-w-0 flex-1">
+                                      <p className="text-sm font-medium text-slate-900 truncate">
+                                        {item.row.title}
+                                      </p>
+                                      {item.row.message && (
+                                        <p className="text-xs text-slate-500 mt-0.5 line-clamp-2">
+                                          {item.row.message}
+                                        </p>
+                                      )}
+                                      <p className="text-xs text-slate-400 mt-1">
+                                        {timeAgo(item.row.created_at)}
+                                      </p>
+                                    </div>
                                   </div>
-                                </div>
-                              </button>
-                            </li>
-                          ))}
+                                </button>
+                              </li>
+                            ) : (
+                              <li key={item.id}>
+                                <button
+                                  onClick={() => {
+                                    setNotifOpen(false);
+                                    window.dispatchEvent(
+                                      new CustomEvent('navigate', { detail: 'notifications' })
+                                    );
+                                  }}
+                                  className={`w-full text-left px-4 py-3 hover:bg-slate-50 transition-colors ${
+                                    item.row.status === 'failed' ? 'bg-[#c46040]/5' : ''
+                                  }`}
+                                >
+                                  <div className="flex items-start gap-2">
+                                    {item.row.status === 'failed' && (
+                                      <span className="mt-1.5 w-1.5 h-1.5 rounded-full bg-[#c46040] flex-shrink-0" />
+                                    )}
+                                    <div className="min-w-0 flex-1">
+                                      <div className="flex items-center gap-2">
+                                        <p className="text-sm font-medium text-slate-900 truncate">
+                                          {prettyEventKey(item.row.event_key)}
+                                        </p>
+                                        <span
+                                          className={`text-[10px] px-1.5 py-0.5 rounded font-medium flex-shrink-0 ${
+                                            MEMBER_STATUS_STYLE[item.row.status]
+                                          }`}
+                                        >
+                                          {item.row.status}
+                                        </span>
+                                      </div>
+                                      <p className="text-xs text-slate-500 mt-0.5 line-clamp-2">
+                                        {item.row.body}
+                                      </p>
+                                      {item.row.error_message && (
+                                        <p className="text-xs text-[#c46040] mt-0.5 line-clamp-1">
+                                          {item.row.error_message}
+                                        </p>
+                                      )}
+                                      <p className="text-xs text-slate-400 mt-1">
+                                        {item.row.channel.toUpperCase()}
+                                        {item.row.recipient ? ` · ${item.row.recipient}` : ''} ·{' '}
+                                        {timeAgo(item.row.created_at)}
+                                      </p>
+                                    </div>
+                                  </div>
+                                </button>
+                              </li>
+                            )
+                          )}
                         </ul>
                       )}
+                    </div>
+
+                    {/* The dropdown shows only the 20 most recent of each kind.
+                        Anything older, plus filtering and delivery detail,
+                        lives on the full page. */}
+                    <div className="px-4 py-2.5 border-t border-slate-100">
+                      <button
+                        onClick={() => {
+                          setNotifOpen(false);
+                          window.dispatchEvent(
+                            new CustomEvent('navigate', { detail: 'notifications' })
+                          );
+                        }}
+                        className="w-full text-center text-xs font-medium text-[#1ebcb2] hover:text-[#641f60] transition-colors"
+                      >
+                        View all notifications
+                      </button>
                     </div>
                   </div>
                 )}

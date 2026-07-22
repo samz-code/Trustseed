@@ -4,10 +4,10 @@ import { supabase } from '../lib/supabase';
 import type { SavingsProduct, SavingsAccount, Customer } from '../types';
 import type { InsertTables } from '../lib/supabase';
 import { formatMoney, currencyFlag } from '../lib/accountCurrencies';
+import { ReceiptModal, buildReceiptData, type ReceiptData } from './TransactionReceipt';
 import {
   Plus,
   PiggyBank,
-  TrendingUp,
   DollarSign,
   Loader2,
   X,
@@ -15,6 +15,12 @@ import {
   RefreshCw,
   ArrowDownCircle,
   ArrowUpCircle,
+  Search,
+  Wallet,
+  Users,
+  Percent,
+  Lock,
+  Landmark,
 } from 'lucide-react';
 
 interface SavingsPageProps {
@@ -39,8 +45,14 @@ type TxType = 'deposit' | 'withdrawal';
 // base currency so nothing is silently assumed to be USD.
 type WithCurrency = { currency?: string | null };
 
+function customerName(c: Customer | undefined | null): string {
+  if (!c) return 'Unknown customer';
+  if (c.customer_type !== 'individual') return c.business_name || 'Unnamed business';
+  return `${c.first_name || ''} ${c.last_name || ''}`.trim() || 'Unnamed';
+}
+
 export function SavingsPage({ tab = 'products' }: SavingsPageProps) {
-  const { tenant, branch } = useAuth();
+  const { tenant, branch, admin } = useAuth();
   const [activeTab, setActiveTab] = useState(tab);
   const [products, setProducts] = useState<SavingsProduct[]>([]);
   const [accounts, setAccounts] = useState<(SavingsAccount & { customer?: Customer })[]>([]);
@@ -59,6 +71,11 @@ export function SavingsPage({ tab = 'products' }: SavingsPageProps) {
   const [txNotes, setTxNotes] = useState('');
   const [txError, setTxError] = useState<string | null>(null);
   const [txSubmitting, setTxSubmitting] = useState(false);
+
+  // Receipt shown after a deposit or withdrawal. A customer paying into their
+  // savings deserves the same proof as one sending a transfer.
+  const [receiptData, setReceiptData] = useState<ReceiptData | null>(null);
+  const [searchQuery, setSearchQuery] = useState('');
 
   const baseCurrency =
     (tenant?.settings as { base_currency?: string; default_currency?: string } | undefined)?.base_currency ??
@@ -127,6 +144,56 @@ export function SavingsPage({ tab = 'products' }: SavingsPageProps) {
 
   const activeProducts = products.filter((p) => p.status === 'active');
 
+  // ------------------------------------------------------------------
+  // Deposit book summary.
+  //
+  // Savings are a liability: this is money the SACCO owes its members, not
+  // money it owns. The figures below say how much is held, how it is spread
+  // across members, and how much of it is actually withdrawable today.
+  // ------------------------------------------------------------------
+  const book = useMemo(() => {
+    const live = accounts.filter((a) => a.status === 'active');
+    const totalBalance = live.reduce((sum, a) => sum + Number(a.balance ?? 0), 0);
+    const available = live.reduce(
+      (sum, a) => sum + Number((a as { available_balance?: number }).available_balance ?? a.balance ?? 0),
+      0
+    );
+    const held = live.reduce(
+      (sum, a) => sum + Number((a as { held_balance?: number }).held_balance ?? 0),
+      0
+    );
+    const accrued = live.reduce(
+      (sum, a) => sum + Number((a as { accrued_interest?: number }).accrued_interest ?? 0),
+      0
+    );
+
+    // Average tells a board whether the book is many small savers or a few
+    // large ones, which changes how a liquidity shock would land.
+    const average = live.length > 0 ? totalBalance / live.length : 0;
+
+    return {
+      accountCount: live.length,
+      totalBalance,
+      available,
+      held,
+      accrued,
+      average,
+      dormant: accounts.length - live.length,
+    };
+  }, [accounts]);
+
+  const filteredAccounts = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (q === '') return accounts;
+    return accounts.filter((a) => {
+      const name = customerName(a.customer);
+      return (
+        name.toLowerCase().includes(q) ||
+        (a.account_number || '').toLowerCase().includes(q)
+      );
+    });
+  }, [accounts, searchQuery]);
+
   const openTransactionModal = (account: SavingsAccount & { customer?: Customer }, type: TxType) => {
     setTxAccount(account);
     setTxType(type);
@@ -163,8 +230,46 @@ export function SavingsPage({ tab = 'products' }: SavingsPageProps) {
       });
       if (error) throw error;
 
+      // Capture what is needed for the receipt before the modal state is
+      // cleared below, and re-read the account so the printed balance is the
+      // one the database now holds rather than the stale figure on screen.
+      const account = txAccount;
+      const opType = txType;
+      const { data: refreshed } = await supabase
+        .from('savings_accounts')
+        .select('balance')
+        .eq('id', account.id)
+        .maybeSingle();
+
       await loadData();
       closeTransactionModal();
+
+      if (tenant) {
+        const customer = customers.find((c) => c.id === account.customer_id);
+        const currency = currencyOf(account as WithCurrency);
+        setReceiptData(
+          buildReceiptData({
+            institutionName: tenant.name,
+            institutionLogoUrl:
+              (tenant.settings as { branding?: { logo_url?: string | null } } | null)?.branding
+                ?.logo_url ?? null,
+            branchName: branch?.name ?? null,
+            transactionId: account.id,
+            reference: account.account_number,
+            transactionType: opType === 'deposit' ? 'savings_deposit' : 'savings_withdrawal',
+            status: 'completed',
+            createdAtIso: new Date().toISOString(),
+            customerName: customerName(customer),
+            customerAccountNumber: account.account_number,
+            amount,
+            currency,
+            remainingWalletBalance:
+              refreshed?.balance !== undefined ? Number(refreshed.balance) : null,
+            remainingWalletCurrency: currency,
+            cashierName: admin?.full_name ?? null,
+          })
+        );
+      }
     } catch (err) {
       console.error('Error processing savings transaction:', err);
       setTxError(err instanceof Error ? err.message : `Failed to process ${txType}`);
@@ -280,58 +385,79 @@ export function SavingsPage({ tab = 'products' }: SavingsPageProps) {
         </div>
       )}
 
-      {/* Stats */}
-      <div className="grid sm:grid-cols-3 gap-4">
-        <div className="bg-white rounded-xl border border-[#dae1e1] p-5">
-          <div className="flex items-center gap-3">
-            <div className="p-2.5 rounded-lg bg-[#1ebcb2]/10">
-              <PiggyBank className="w-6 h-6 text-[#1ebcb2]" />
+      {/* ================================================================
+          Deposit book. Savings are money the SACCO owes its members, so
+          these read as a liability position rather than as revenue.
+          ================================================================ */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        <div className="group bg-white rounded-xl border border-[#dae1e1] p-5 transition-all duration-200 hover:shadow-lg hover:shadow-slate-200/60 hover:-translate-y-0.5 hover:border-[#1ebcb2]/40">
+          <div className="flex items-center justify-between mb-3">
+            <div className="w-10 h-10 rounded-lg bg-[#1ebcb2]/10 flex items-center justify-center transition-colors group-hover:bg-[#1ebcb2]/20">
+              <Landmark className="w-5 h-5 text-[#1ebcb2]" />
             </div>
-            <div>
-              <p className="text-sm text-slate-500">Products</p>
-              <p className="text-2xl font-bold text-slate-900">{products.length}</p>
-            </div>
+            <span className="text-xs text-slate-400">{book.accountCount} accounts</span>
           </div>
-        </div>
-        <div className="bg-white rounded-xl border border-[#dae1e1] p-5">
-          <div className="flex items-center gap-3">
-            <div className="p-2.5 rounded-lg bg-[#641f60]/10">
-              <TrendingUp className="w-6 h-6 text-[#641f60]" />
-            </div>
-            <div>
-              <p className="text-sm text-slate-500">Active Accounts</p>
-              <p className="text-2xl font-bold text-slate-900">
-                {accounts.filter((a) => a.status === 'active').length}
-              </p>
-            </div>
-          </div>
-        </div>
-        <div className="bg-white rounded-xl border border-[#dae1e1] p-5">
-          <div className="flex items-center gap-3">
-            <div className="p-2.5 rounded-lg bg-[#ee7b22]/10">
-              <DollarSign className="w-6 h-6 text-[#ee7b22]" />
-            </div>
-            <div className="min-w-0">
-              <p className="text-sm text-slate-500">Total Savings</p>
-              {totalsByCurrency.length === 0 ? (
-                <p className="text-2xl font-bold text-slate-900">
-                  {currencyFlag(baseCurrency)} {formatMoney(0, baseCurrency)}
+          <p className="text-xs font-medium text-slate-500 mb-1">Total deposits held</p>
+          {totalsByCurrency.length === 0 ? (
+            <p className="text-2xl font-bold text-[#159089] tabular-nums">
+              {formatMoney(0, baseCurrency)}
+            </p>
+          ) : totalsByCurrency.length === 1 ? (
+            <p className="text-2xl font-bold text-[#159089] tabular-nums break-words">
+              {formatMoney(totalsByCurrency[0].total, totalsByCurrency[0].code)}
+            </p>
+          ) : (
+            /* Multi-currency books are never summed into one figure: adding
+               KES to USD produces a number that means nothing. */
+            <div className="space-y-0.5">
+              {totalsByCurrency.map(({ code, total }) => (
+                <p key={code} className="text-base font-bold text-[#159089] tabular-nums break-words">
+                  <span aria-hidden className="mr-1">{currencyFlag(code)}</span>
+                  {formatMoney(total, code)}
                 </p>
-              ) : totalsByCurrency.length === 1 ? (
-                <p className="text-2xl font-bold text-slate-900 break-words">
-                  {currencyFlag(totalsByCurrency[0].code)} {formatMoney(totalsByCurrency[0].total, totalsByCurrency[0].code)}
-                </p>
-              ) : (
-                <div className="space-y-0.5">
-                  {totalsByCurrency.map(({ code, total }) => (
-                    <p key={code} className="text-base font-bold text-slate-900 break-words">
-                      {currencyFlag(code)} {formatMoney(total, code)}
-                    </p>
-                  ))}
-                </div>
-              )}
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="group bg-white rounded-xl border border-[#dae1e1] p-5 transition-all duration-200 hover:shadow-lg hover:shadow-slate-200/60 hover:-translate-y-0.5 hover:border-[#641f60]/30">
+          <div className="flex items-center justify-between mb-3">
+            <div className="w-10 h-10 rounded-lg bg-[#641f60]/10 flex items-center justify-center transition-colors group-hover:bg-[#641f60]/15">
+              <Users className="w-5 h-5 text-[#641f60]" />
+            </div>
+            {book.dormant > 0 && (
+              <span className="text-xs text-slate-400">{book.dormant} inactive</span>
+            )}
+          </div>
+          <p className="text-xs font-medium text-slate-500 mb-1">Average balance</p>
+          <p className="text-2xl font-bold text-[#641f60] tabular-nums">
+            {formatMoney(book.average, baseCurrency)}
+          </p>
+        </div>
+
+        <div className="group bg-white rounded-xl border border-[#dae1e1] p-5 transition-all duration-200 hover:shadow-lg hover:shadow-slate-200/60 hover:-translate-y-0.5 hover:border-[#ee7b22]/40">
+          <div className="flex items-center justify-between mb-3">
+            <div className="w-10 h-10 rounded-lg bg-[#ee7b22]/10 flex items-center justify-center transition-colors group-hover:bg-[#ee7b22]/20">
+              <Lock className="w-5 h-5 text-[#ee7b22]" />
             </div>
           </div>
+          <p className="text-xs font-medium text-slate-500 mb-1">Held / not withdrawable</p>
+          <p className="text-2xl font-bold text-[#ee7b22] tabular-nums">
+            {formatMoney(book.held, baseCurrency)}
+          </p>
+        </div>
+
+        <div className="group bg-white rounded-xl border border-[#dae1e1] p-5 transition-all duration-200 hover:shadow-lg hover:shadow-slate-200/60 hover:-translate-y-0.5 hover:border-[#c46040]/40">
+          <div className="flex items-center justify-between mb-3">
+            <div className="w-10 h-10 rounded-lg bg-[#c46040]/10 flex items-center justify-center transition-colors group-hover:bg-[#c46040]/20">
+              <Percent className="w-5 h-5 text-[#c46040]" />
+            </div>
+            <span className="text-xs text-slate-400">{products.length} products</span>
+          </div>
+          <p className="text-xs font-medium text-slate-500 mb-1">Interest accrued</p>
+          <p className="text-2xl font-bold text-[#c46040] tabular-nums">
+            {formatMoney(book.accrued, baseCurrency)}
+          </p>
         </div>
       </div>
 
@@ -372,35 +498,75 @@ export function SavingsPage({ tab = 'products' }: SavingsPageProps) {
         ) : (
           <>
             {activeTab === 'products' && (
-              <div className="divide-y divide-[#dae1e1]">
+              <div className="p-4">
                 {products.length > 0 ? (
-                  products.map((product) => {
-                    const code = currencyOf(product as WithCurrency);
-                    return (
-                      <div key={product.id} className="p-6 hover:bg-slate-50 transition-colors">
-                        <div className="flex items-center justify-between gap-4">
-                          <div className="min-w-0">
-                            <h3 className="font-semibold text-slate-900 flex items-center gap-2">
-                              {product.name}
-                              <span className="text-xs font-medium text-slate-400 inline-flex items-center gap-1">
-                                <span aria-hidden>{currencyFlag(code)}</span>
-                                {code}
-                              </span>
-                            </h3>
-                            <p className="text-sm text-slate-500">{product.code}</p>
+                  <div className="grid sm:grid-cols-2 xl:grid-cols-3 gap-4">
+                    {products.map((product) => {
+                      const code = currencyOf(product as WithCurrency);
+                      const isActive = product.status === 'active';
+                      return (
+                        <div
+                          key={product.id}
+                          className={`group rounded-xl border p-5 transition-all duration-200 ${
+                            isActive
+                              ? 'border-[#dae1e1] hover:border-[#1ebcb2]/50 hover:shadow-lg hover:shadow-slate-200/50 hover:-translate-y-0.5'
+                              : 'border-[#dae1e1] bg-slate-50/60'
+                          }`}
+                        >
+                          <div className="flex items-start justify-between gap-3 mb-4">
+                            <div className="min-w-0">
+                              <h3 className="font-semibold text-slate-900 truncate">
+                                {product.name}
+                              </h3>
+                              <p className="text-xs text-slate-400 font-mono mt-0.5">
+                                {product.code}
+                              </p>
+                            </div>
+                            <span className="text-xs font-medium text-slate-400 inline-flex items-center gap-1 flex-shrink-0">
+                              <span aria-hidden>{currencyFlag(code)}</span>
+                              {code}
+                            </span>
                           </div>
-                          <div className="text-right shrink-0">
-                            <p className="text-lg font-bold text-[#1ebcb2]">{product.interest_rate}% p.a.</p>
-                            <p className="text-sm text-slate-500">Min: {formatMoney(product.min_balance, code)}</p>
+
+                          {/* The rate is the number a member compares between
+                              products, so it gets the weight on the card. */}
+                          <div className="flex items-end justify-between gap-3 pt-3 border-t border-slate-100">
+                            <div>
+                              <p className="text-[11px] font-medium text-slate-400 mb-0.5">
+                                Interest rate
+                              </p>
+                              <p className="text-xl font-bold text-[#1ebcb2] tabular-nums">
+                                {product.interest_rate}
+                                <span className="text-sm font-semibold text-slate-400 ml-0.5">
+                                  % p.a.
+                                </span>
+                              </p>
+                            </div>
+                            <div className="text-right">
+                              <p className="text-[11px] font-medium text-slate-400 mb-0.5">
+                                Minimum balance
+                              </p>
+                              <p className="text-sm font-semibold text-slate-700 tabular-nums">
+                                {formatMoney(product.min_balance, code)}
+                              </p>
+                            </div>
                           </div>
+
+                          {!isActive && (
+                            <p className="mt-3 text-[11px] text-slate-400">
+                              Inactive. New accounts cannot be opened on this product.
+                            </p>
+                          )}
                         </div>
-                      </div>
-                    );
-                  })
+                      );
+                    })}
+                  </div>
                 ) : (
-                  <div className="py-12 text-center">
-                    <PiggyBank className="w-12 h-12 text-slate-300 mx-auto mb-3" />
-                    <p className="text-slate-500">No savings products yet</p>
+                  <div className="py-16 text-center">
+                    <div className="w-14 h-14 rounded-full bg-[#1ebcb2]/5 flex items-center justify-center mx-auto mb-3">
+                      <PiggyBank className="w-7 h-7 text-[#1ebcb2]/40" />
+                    </div>
+                    <p className="font-medium text-slate-600">No savings products yet</p>
                     <p className="text-sm text-slate-400 mt-1">
                       Add products from the Savings Products page in the sidebar.
                     </p>
@@ -410,64 +576,125 @@ export function SavingsPage({ tab = 'products' }: SavingsPageProps) {
             )}
 
             {activeTab === 'accounts' && (
-              <div className="divide-y divide-[#dae1e1]">
-                {accounts.length > 0 ? (
-                  accounts.map((account) => {
-                    const code = currencyOf(account as WithCurrency);
-                    return (
-                      <div key={account.id} className="p-6 hover:bg-slate-50 transition-colors">
-                        <div className="flex items-center justify-between gap-4">
-                          <div className="flex items-center gap-4 min-w-0">
-                            <div className="w-12 h-12 rounded-full bg-[#1ebcb2]/10 flex items-center justify-center shrink-0">
-                              <DollarSign className="w-6 h-6 text-[#1ebcb2]" />
+              <div className="p-4 space-y-4">
+                {accounts.length > 0 && (
+                  <div className="relative max-w-sm">
+                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                    <input
+                      type="text"
+                      value={searchQuery}
+                      onChange={(e) => setSearchQuery(e.target.value)}
+                      placeholder="Search member or account number..."
+                      className="w-full pl-9 pr-4 py-2 text-sm border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#1ebcb2] focus:border-transparent transition-shadow"
+                    />
+                  </div>
+                )}
+
+                {filteredAccounts.length > 0 ? (
+                  <div className="grid sm:grid-cols-2 xl:grid-cols-3 gap-4">
+                    {filteredAccounts.map((account) => {
+                      const code = currencyOf(account as WithCurrency);
+                      const balance = Number(account.balance ?? 0);
+                      const held = Number(
+                        (account as { held_balance?: number }).held_balance ?? 0
+                      );
+                      const available = Number(
+                        (account as { available_balance?: number }).available_balance ?? balance
+                      );
+                      const isActive = account.status === 'active';
+
+                      return (
+                        <div
+                          key={account.id}
+                          className={`group rounded-xl border p-5 transition-all duration-200 ${
+                            isActive
+                              ? 'border-[#dae1e1] hover:border-[#641f60]/40 hover:shadow-lg hover:shadow-slate-200/50 hover:-translate-y-0.5'
+                              : 'border-[#dae1e1] bg-slate-50/60'
+                          }`}
+                        >
+                          <div className="flex items-start gap-3 mb-4">
+                            <div
+                              className={`w-10 h-10 rounded-lg flex items-center justify-center flex-shrink-0 transition-colors ${
+                                isActive
+                                  ? 'bg-[#1ebcb2]/10 group-hover:bg-[#1ebcb2]/20'
+                                  : 'bg-slate-200/70'
+                              }`}
+                            >
+                              <Wallet
+                                className={`w-5 h-5 ${isActive ? 'text-[#1ebcb2]' : 'text-slate-400'}`}
+                              />
                             </div>
-                            <div className="min-w-0">
-                              <h3 className="font-semibold text-slate-900 truncate">
-                                {account.customer?.first_name} {account.customer?.last_name}
+                            <div className="min-w-0 flex-1">
+                              <h3 className="font-semibold text-slate-900 text-sm truncate">
+                                {customerName(account.customer)}
                               </h3>
-                              <p className="text-sm text-slate-500">{account.account_number}</p>
+                              <p className="text-xs text-slate-400 font-mono mt-0.5 truncate">
+                                {account.account_number}
+                              </p>
                             </div>
-                          </div>
-                          <div className="flex items-center gap-4 shrink-0">
                             <span
-                              className={`px-2.5 py-1 rounded-full text-xs font-medium ${
-                                account.status === 'active'
-                                  ? 'bg-green-100 text-green-700'
-                                  : 'bg-slate-100 text-slate-600'
+                              className={`px-2 py-0.5 rounded text-[10px] font-medium capitalize flex-shrink-0 ${
+                                isActive
+                                  ? 'bg-[#1ebcb2]/10 text-[#159089]'
+                                  : 'bg-slate-100 text-slate-500'
                               }`}
                             >
                               {account.status}
                             </span>
-                            <div className="text-right">
-                              <p className="text-lg font-bold text-slate-900 whitespace-nowrap">
-                                {currencyFlag(code)} {formatMoney(account.balance || 0, code)}
+                          </div>
+
+                          <div className="mb-4">
+                            <p className="text-[11px] font-medium text-slate-400 mb-0.5">
+                              <span aria-hidden className="mr-1">{currencyFlag(code)}</span>
+                              Balance
+                            </p>
+                            <p className="text-2xl font-bold text-slate-900 tabular-nums">
+                              {formatMoney(balance, code)}
+                            </p>
+                            {/* Only shown when some of the balance is locked.
+                                A member asking why they cannot withdraw their
+                                full balance is asking about this line. */}
+                            {held > 0 && (
+                              <p className="text-[11px] text-[#ee7b22] mt-1 tabular-nums">
+                                {formatMoney(available, code)} available &middot;{' '}
+                                {formatMoney(held, code)} held
                               </p>
-                            </div>
+                            )}
+                          </div>
+
+                          <div className="flex items-center gap-2 pt-3 border-t border-slate-100">
                             <button
                               onClick={() => openTransactionModal(account, 'deposit')}
-                              className="p-2 rounded-lg text-slate-400 hover:text-[#1ebcb2] hover:bg-slate-100 transition-colors"
-                              aria-label="Deposit"
-                              title="Deposit"
+                              disabled={!isActive}
+                              className="flex-1 inline-flex items-center justify-center gap-1.5 px-3 py-2 bg-[#1ebcb2] hover:bg-[#159089] text-white text-xs font-semibold rounded-lg transition-all duration-200 hover:shadow-md hover:shadow-[#1ebcb2]/25 active:scale-[0.97] disabled:opacity-40 disabled:hover:shadow-none disabled:active:scale-100"
                             >
-                              <ArrowDownCircle className="w-5 h-5" />
+                              <ArrowDownCircle className="w-3.5 h-3.5" />
+                              Deposit
                             </button>
                             <button
                               onClick={() => openTransactionModal(account, 'withdrawal')}
-                              className="p-2 rounded-lg text-slate-400 hover:text-[#ee7b22] hover:bg-slate-100 transition-colors"
-                              aria-label="Withdraw"
-                              title="Withdraw"
+                              disabled={!isActive || available <= 0}
+                              className="flex-1 inline-flex items-center justify-center gap-1.5 px-3 py-2 border border-[#ee7b22] text-[#ee7b22] hover:bg-[#ee7b22] hover:text-white text-xs font-semibold rounded-lg transition-all duration-200 active:scale-[0.97] disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-[#ee7b22] disabled:active:scale-100"
                             >
-                              <ArrowUpCircle className="w-5 h-5" />
+                              <ArrowUpCircle className="w-3.5 h-3.5" />
+                              Withdraw
                             </button>
                           </div>
                         </div>
-                      </div>
-                    );
-                  })
+                      );
+                    })}
+                  </div>
+                ) : accounts.length > 0 ? (
+                  <div className="py-14 text-center">
+                    <Search className="w-10 h-10 text-slate-300 mx-auto mb-3" />
+                    <p className="text-sm text-slate-500">No accounts match your search.</p>
+                  </div>
                 ) : (
-                  <div className="py-12 text-center">
-                    <DollarSign className="w-12 h-12 text-slate-300 mx-auto mb-3" />
-                    <p className="text-slate-500">No savings accounts yet</p>
+                  <div className="py-16 text-center">
+                    <div className="w-14 h-14 rounded-full bg-[#641f60]/5 flex items-center justify-center mx-auto mb-3">
+                      <Wallet className="w-7 h-7 text-[#641f60]/40" />
+                    </div>
+                    <p className="font-medium text-slate-600">No savings accounts yet</p>
                     {activeProducts.length === 0 && (
                       <p className="text-sm text-slate-400 mt-1">
                         Create an active savings product first before opening accounts.
@@ -483,8 +710,8 @@ export function SavingsPage({ tab = 'products' }: SavingsPageProps) {
 
       {/* Create Account modal */}
       {showForm && (
-        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full">
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-[2px] z-50 flex items-center justify-center p-4 animate-in fade-in duration-150">
+          <div className="bg-white rounded-2xl shadow-2xl animate-in zoom-in-95 duration-200 max-w-md w-full">
             <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between">
               <h2 className="text-xl font-bold text-[#641f60]">Create Savings Account</h2>
               <button
@@ -595,8 +822,8 @@ export function SavingsPage({ tab = 'products' }: SavingsPageProps) {
 
       {/* Deposit / Withdraw modal */}
       {txAccount && (
-        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full">
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-[2px] z-50 flex items-center justify-center p-4 animate-in fade-in duration-150">
+          <div className="bg-white rounded-2xl shadow-2xl animate-in zoom-in-95 duration-200 max-w-md w-full">
             <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between">
               <h2 className="text-xl font-bold text-[#641f60]">
                 {txType === 'deposit' ? 'Deposit to' : 'Withdraw from'}{' '}
@@ -729,6 +956,12 @@ export function SavingsPage({ tab = 'products' }: SavingsPageProps) {
             </form>
           </div>
         </div>
+      )}
+
+      {/* Receipt — printed from what the database recorded, including the
+          balance after the movement rather than the figure on screen before. */}
+      {receiptData && (
+        <ReceiptModal data={receiptData} onClose={() => setReceiptData(null)} />
       )}
     </div>
   );

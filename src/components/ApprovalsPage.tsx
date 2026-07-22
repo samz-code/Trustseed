@@ -19,7 +19,9 @@ import {
   ArrowRightLeft,
   Building,
   KeyRound,
+  Printer,
 } from 'lucide-react';
+import { ReceiptModal, buildReceiptData, type ReceiptData } from './TransactionReceipt';
 
 type Approval = Tables<'transaction_approvals'>;
 type Transaction = Tables<'transactions'>;
@@ -63,7 +65,7 @@ function canActOnRole(adminRole: string | undefined, requiredRole: string): bool
 }
 
 export function ApprovalsPage() {
-  const { tenant, admin } = useAuth();
+  const { tenant, admin, branch } = useAuth();
 
   const [groups, setGroups] = useState<ApprovalGroup[]>([]);
   const [loading, setLoading] = useState(true);
@@ -73,6 +75,7 @@ export function ApprovalsPage() {
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
   const [actioningId, setActioningId] = useState<string | null>(null);
+  const [receiptData, setReceiptData] = useState<ReceiptData | null>(null);
   const [rejectingApproval, setRejectingApproval] = useState<Approval | null>(null);
   const [rejectionNotes, setRejectionNotes] = useState('');
 
@@ -173,6 +176,60 @@ export function ApprovalsPage() {
   // manager approval only clears the way; the transaction only executes once
   // the originating cashier confirms with their PIN (TransactionsPage), which
   // is itself verified server-side, never by this page or the client.
+  // Builds a receipt from a transaction row. Called when a final approval
+  // completes a transaction, and available for reprint from any cleared row.
+  // The cashier's name is left blank rather than filled with the approver:
+  // the person who took the cash is not the person signing it off.
+  const buildReceiptForTransaction = useCallback(
+    (tx: Transaction, customerName: string | null): ReceiptData =>
+      buildReceiptData({
+        institutionName: (tenant as { name?: string } | null)?.name || 'Institution',
+        institutionLogoUrl: (tenant as { logo_url?: string } | null)?.logo_url || null,
+        branchName: branch?.name || null,
+        transactionId: tx.id,
+        reference: tx.reference,
+        transactionType: tx.transaction_type,
+        status: 'Completed',
+        createdAtIso: tx.created_at,
+        customerName,
+        customerAccountNumber: null,
+        senderName: tx.sender_name || null,
+        senderPhone: tx.sender_phone || null,
+        receiverName: tx.receiver_name || null,
+        receiverPhone: tx.receiver_phone || null,
+        amount: Number(tx.amount || 0),
+        currency: tx.currency,
+        chargesAmount: Number(tx.fee_amount || 0) || null,
+        chargesCurrency: tx.fee_currency || tx.currency,
+        exchangeRate: tx.exchange_rate || null,
+        toCurrency: tx.to_currency || null,
+        remainingFloatBalance: tx.float_balance_after ?? null,
+        remainingFloatCurrency: tx.currency,
+        cashierName: null,
+      }),
+    [tenant, branch]
+  );
+
+  // Resolves a display name for the member on a transaction, preferring the
+  // name stored on the row at the point of entry.
+  const memberNameFor = useCallback(
+    async (tx: Transaction): Promise<string | null> => {
+      if (tx.sender_name) return tx.sender_name;
+      const id = tx.from_customer_id || tx.to_customer_id;
+      if (!id) return null;
+      const { data } = await supabase
+        .from('customers')
+        .select('first_name, last_name, business_name, customer_type')
+        .eq('id', id)
+        .maybeSingle();
+      if (!data) return null;
+      return data.customer_type !== 'individual'
+        ? data.business_name || 'Unnamed business'
+        : `${data.first_name || ''} ${data.last_name || ''}`.trim() || 'Unnamed';
+    },
+    []
+  );
+
   const advanceTransactionIfComplete = async (group: ApprovalGroup, justApprovedLevel: number) => {
     if (!tenant) return;
     const remaining = group.approvals.filter(
@@ -207,6 +264,45 @@ export function ApprovalsPage() {
           })
           .eq('id', group.transaction.id)
           .eq('tenant_id', tenant.id);
+
+        // The transaction is now real money moved. Two things follow.
+        //
+        // A receipt, because until this moment nothing printable existed:
+        // the member paid at the counter, the transaction went to pending,
+        // and they left with no artifact. The branch needs one on file even
+        // if the member is no longer standing there.
+        //
+        // And a notification, which is the part that actually reaches the
+        // member, since by now they have gone home. Wrapped so a template or
+        // delivery problem cannot undo an approval that has already been
+        // recorded.
+        const tx = group.transaction;
+        const name = await memberNameFor(tx);
+        setReceiptData(buildReceiptForTransaction(tx, name));
+
+        try {
+          const customerId = tx.from_customer_id || tx.to_customer_id;
+          if (customerId) {
+            await supabase.rpc('dispatch_notification', {
+              p_tenant_id: tenant.id,
+              p_customer_id: customerId,
+              p_event_key: tx.transaction_type,
+              p_payload: {
+                amount: Number(tx.amount || 0).toLocaleString(undefined, {
+                  minimumFractionDigits: 2,
+                  maximumFractionDigits: 2,
+                }),
+                currency: tx.currency,
+                transaction_reference: tx.reference,
+              },
+              p_reference_type: 'transaction',
+              p_reference_id: tx.id,
+              p_branch_id: tx.branch_id,
+            } as never);
+          }
+        } catch (notifyErr) {
+          console.error('Transaction approved but member notification failed:', notifyErr);
+        }
       }
     } else {
       // Advance the level counter so downstream UI reflects progress.
@@ -467,6 +563,25 @@ export function ApprovalsPage() {
                         )}
                       </div>
 
+                      {/* Reprint for anything already cleared. Approvals often
+                          finalise after the member has left, so the branch may
+                          need the receipt hours later. */}
+                      {group.isFullyApproved && !awaitingPin && (
+                        <div className="flex items-center flex-shrink-0">
+                          <button
+                            onClick={async () => {
+                              const name = await memberNameFor(tx);
+                              setReceiptData(buildReceiptForTransaction(tx, name));
+                            }}
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 border border-slate-300 text-slate-600 hover:bg-slate-50 hover:border-slate-400 text-xs font-medium rounded-lg transition-all"
+                            title="Reprint receipt"
+                          >
+                            <Printer className="w-3.5 h-3.5" />
+                            Receipt
+                          </button>
+                        </div>
+                      )}
+
                       {currentLevel && (
                         <div className="flex items-center gap-2 flex-shrink-0">
                           {actionable ? (
@@ -618,6 +733,10 @@ export function ApprovalsPage() {
             </div>
           </div>
         </div>
+      )}
+
+      {receiptData && (
+        <ReceiptModal data={receiptData} onClose={() => setReceiptData(null)} />
       )}
     </div>
   );

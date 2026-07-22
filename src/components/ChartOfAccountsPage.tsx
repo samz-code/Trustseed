@@ -19,6 +19,7 @@ import {
   Wallet,
   Landmark,
   Scale,
+  FileSpreadsheet,
   TrendingUp,
   TrendingDown,
 } from 'lucide-react';
@@ -154,18 +155,134 @@ export function ChartOfAccountsPage() {
     return acc ? `${acc.account_code} · ${acc.account_name}` : 'Unknown';
   };
 
-  const validateForm = (): string | null => {
-    if (!formData.account_code.trim()) return 'Account code is required.';
-    if (!formData.account_name.trim()) return 'Account name is required.';
-    if (!editingAccount) {
-      // duplicate-code guard is also enforced by the DB unique constraint,
-      // but checking client-side gives an immediate, friendlier message
-      const codeExists = accounts.some(
-        (a) => a.account_code.trim().toLowerCase() === formData.account_code.trim().toLowerCase()
-      );
-      if (codeExists) return `Account code "${formData.account_code.trim()}" is already in use.`;
+  // Standard accounting code ranges. Getting these wrong is not cosmetic:
+  // this chart currently holds cash classified as an expense AND as equity,
+  // which makes the trial balance wrong by construction. The old validation
+  // only checked that the fields were non-empty, which is how that happened.
+  const CODE_RANGES: { type: AccountType; min: number; max: number; label: string }[] = [
+    { type: 'asset', min: 1000, max: 1999, label: '1000-1999' },
+    { type: 'liability', min: 2000, max: 2999, label: '2000-2999' },
+    { type: 'equity', min: 3000, max: 3999, label: '3000-3999' },
+    { type: 'revenue', min: 4000, max: 4999, label: '4000-4999' },
+    { type: 'expense', min: 5000, max: 5999, label: '5000-5999' },
+  ];
+
+  const expectedTypeForCode = (code: string): AccountType | null => {
+    const n = parseInt(code.trim(), 10);
+    if (Number.isNaN(n)) return null;
+    return CODE_RANGES.find((r) => n >= r.min && n <= r.max)?.type ?? null;
+  };
+
+  const rangeForType = (type: AccountType): string =>
+    CODE_RANGES.find((r) => r.type === type)?.label ?? '';
+
+  // Shown as a warning under the code field, not blocking: an institution may
+  // have a legitimate reason for an unusual code, but should see the mismatch.
+  const codeTypeWarning = useMemo((): string | null => {
+    const code = formData.account_code.trim();
+    if (!code) return null;
+    const expected = expectedTypeForCode(code);
+    if (!expected) return null;
+    if (expected !== formData.account_type) {
+      return `Code ${code} is normally ${singularType(expected).toLowerCase()} (${rangeForType(
+        expected
+      )}), but this is set as ${singularType(formData.account_type).toLowerCase()}.`;
     }
     return null;
+  }, [formData.account_code, formData.account_type]);
+
+  const validateForm = (): string | null => {
+    const code = formData.account_code.trim();
+    const name = formData.account_name.trim();
+
+    if (!code) return 'Account code is required.';
+    if (!name) return 'Account name is required.';
+
+    // A code like "NT-)!" or "gh5678" cannot be sorted, grouped or reported on
+    // sensibly. Digits only, which is what every standard chart uses.
+    if (!/^\d{3,6}$/.test(code)) {
+      return 'Account code must be 3 to 6 digits, e.g. 1000. Letters and punctuation cannot be sorted or grouped into statements.';
+    }
+
+    if (!editingAccount) {
+      const codeExists = accounts.some(
+        (a) => a.account_code.trim().toLowerCase() === code.toLowerCase()
+      );
+      if (codeExists) return `Account code "${code}" is already in use.`;
+
+      // Three accounts called "cash on hand" with three different types is
+      // how this chart ended up unusable. Catch the duplicate at entry.
+      const nameExists = accounts.some(
+        (a) =>
+          a.is_active &&
+          a.account_name.trim().toLowerCase() === name.toLowerCase()
+      );
+      if (nameExists) {
+        return `An active account named "${name}" already exists. Use a different name, or edit the existing one.`;
+      }
+    }
+
+    return null;
+  };
+
+  // A standard MFI/SACCO chart. Offered when an institution has none, because
+  // journal entries have to post somewhere: without accounts, the general
+  // ledger and trial balance stay empty no matter how much money moves.
+  const STANDARD_CHART: {
+    account_code: string;
+    account_name: string;
+    account_type: AccountType;
+    account_category: string;
+  }[] = [
+    { account_code: '1000', account_name: 'Cash on Hand', account_type: 'asset', account_category: 'cash' },
+    { account_code: '1010', account_name: 'Bank Account', account_type: 'asset', account_category: 'bank' },
+    { account_code: '1020', account_name: 'Mobile Money Float', account_type: 'asset', account_category: 'cash' },
+    { account_code: '1200', account_name: 'Loans Receivable', account_type: 'asset', account_category: 'receivable' },
+    { account_code: '1210', account_name: 'Interest Receivable', account_type: 'asset', account_category: 'receivable' },
+    { account_code: '2000', account_name: 'Customer Deposits', account_type: 'liability', account_category: 'payable' },
+    { account_code: '2100', account_name: 'Savings Payable', account_type: 'liability', account_category: 'payable' },
+    { account_code: '3000', account_name: 'Owner Equity', account_type: 'equity', account_category: 'equity' },
+    { account_code: '3100', account_name: 'Retained Earnings', account_type: 'equity', account_category: 'equity' },
+    { account_code: '4000', account_name: 'Interest Income', account_type: 'revenue', account_category: 'income' },
+    { account_code: '4100', account_name: 'Fee Income', account_type: 'revenue', account_category: 'income' },
+    { account_code: '4200', account_name: 'Forex Gain', account_type: 'revenue', account_category: 'income' },
+    { account_code: '5000', account_name: 'Operating Expenses', account_type: 'expense', account_category: 'expense' },
+    { account_code: '5100', account_name: 'Staff Costs', account_type: 'expense', account_category: 'expense' },
+    { account_code: '5200', account_name: 'Loan Loss Provision', account_type: 'expense', account_category: 'expense' },
+  ];
+
+  const [seeding, setSeeding] = useState(false);
+
+  const seedStandardChart = async () => {
+    if (!tenant) return;
+    setSeeding(true);
+    setLoadError(null);
+    try {
+      // Only add what is missing, so this is safe to press twice and safe on
+      // a chart that already has some accounts.
+      const existingCodes = new Set(accounts.map((a) => a.account_code.trim()));
+      const toInsert = STANDARD_CHART.filter((a) => !existingCodes.has(a.account_code)).map((a) => ({
+        tenant_id: tenant.id,
+        ...a,
+        is_active: true,
+        allow_manual_entry: true,
+        is_system_account: false,
+      }));
+
+      if (toInsert.length === 0) {
+        setLoadError('Every standard account already exists in this chart.');
+        return;
+      }
+
+      const { error } = await supabase.from('chart_of_accounts').insert(toInsert as never);
+      if (error) throw error;
+      await loadAccounts();
+    } catch (err) {
+      console.error('Error seeding chart of accounts:', err);
+      setLoadError(err instanceof Error ? err.message : 'Failed to add the standard accounts');
+    } finally {
+      setSeeding(false);
+    }
   };
 
   const openCreateForm = (presetType?: AccountType) => {
@@ -354,15 +471,34 @@ export function ChartOfAccountsPage() {
           </div>
           <h3 className="text-lg font-semibold text-slate-900 mb-1">No accounts yet</h3>
           <p className="text-slate-500 text-center max-w-sm">
-            Start building your chart of accounts by adding your first account.
+            Journal entries have to post somewhere. Until this chart has accounts, the general
+            ledger and trial balance stay empty no matter how much money moves.
           </p>
-          <button
-            onClick={() => openCreateForm()}
-            className="mt-4 inline-flex items-center gap-2 px-4 py-2 bg-[#ee7b22] hover:bg-[#c46040] text-white font-medium rounded-lg transition-colors"
-          >
-            <Plus className="w-5 h-5" />
-            Add First Account
-          </button>
+          <div className="mt-4 flex flex-col sm:flex-row items-center gap-3">
+            <button
+              onClick={seedStandardChart}
+              disabled={seeding}
+              className="inline-flex items-center gap-2 px-4 py-2 bg-[#ee7b22] hover:bg-[#c46040] text-white font-medium rounded-lg transition-colors disabled:opacity-50"
+            >
+              {seeding ? (
+                <Loader2 className="w-5 h-5 animate-spin" />
+              ) : (
+                <FileSpreadsheet className="w-5 h-5" />
+              )}
+              Use standard MFI chart
+            </button>
+            <button
+              onClick={() => openCreateForm()}
+              className="inline-flex items-center gap-2 px-4 py-2 border border-slate-300 text-slate-700 font-medium rounded-lg hover:bg-slate-50 transition-colors"
+            >
+              <Plus className="w-5 h-5" />
+              Add manually
+            </button>
+          </div>
+          <p className="text-xs text-slate-400 mt-3 text-center max-w-sm">
+            The standard chart covers cash, loans, deposits, income and expenses, following the
+            usual code ranges.
+          </p>
         </div>
       ) : noSearchResults ? (
         <div className="bg-white rounded-xl border border-slate-200 flex flex-col items-center justify-center py-12 px-4">
@@ -431,80 +567,135 @@ export function ChartOfAccountsPage() {
                 </div>
 
                 {!isCollapsed && (
-                  <div className="divide-y divide-slate-100 border-t border-slate-100">
+                  <div className="border-t border-slate-100 p-4">
                     {list.length === 0 ? (
-                      <div className="px-5 py-6 text-center text-sm text-slate-400">
+                      <div className="py-6 text-center text-sm text-slate-400">
                         No {label.toLowerCase()} accounts yet.
                       </div>
                     ) : (
-                      list.map((account) => (
-                        <div
-                          key={account.id}
-                          className={`px-5 py-3.5 flex items-center gap-4 hover:bg-slate-50 transition-colors ${
-                            !account.is_active ? 'opacity-60' : ''
-                          }`}
-                        >
-                          <div className="w-20 flex-shrink-0">
-                            <span className="text-sm font-mono font-medium text-slate-700">
-                              {account.account_code}
-                            </span>
-                          </div>
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-center gap-2">
-                              <p className="font-medium text-slate-900 truncate">
-                                {account.account_name}
-                              </p>
-                              {account.is_system_account && (
-                                <span title="System account — code and type are locked">
-                                  <Lock className="w-3.5 h-3.5 text-slate-400 flex-shrink-0" />
-                                </span>
-                              )}
+                      /* Cards rather than rows: an account has a code, a name,
+                         a category, a parent and a status, and squeezing all
+                         of that into one line meant most of it was truncated
+                         or dropped. */
+                      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                        {list.map((account) => {
+                          const expected = expectedTypeForCode(account.account_code);
+                          const mismatched = expected != null && expected !== account.account_type;
+                          return (
+                            <div
+                              key={account.id}
+                              className={`relative rounded-xl border bg-white p-4 transition-all hover:shadow-md ${
+                                account.is_active
+                                  ? mismatched
+                                    ? 'border-[#ee7b22]/40'
+                                    : 'border-slate-200 hover:border-slate-300'
+                                  : 'border-slate-200 bg-slate-50/60 opacity-70'
+                              }`}
+                            >
+                              {/* A coloured edge keeps the type readable at a
+                                  glance when scanning a wall of cards. */}
+                              <div
+                                className={`absolute left-0 top-4 bottom-4 w-1 rounded-r ${colors.text.replace(
+                                  'text-',
+                                  'bg-'
+                                )}`}
+                              />
+
+                              <div className="pl-3">
+                                <div className="flex items-start justify-between gap-2 mb-2">
+                                  <span className="font-mono text-sm font-semibold text-slate-700">
+                                    {account.account_code}
+                                  </span>
+                                  <div className="flex items-center gap-1.5 flex-shrink-0">
+                                    {account.is_system_account && (
+                                      <span title="System account — code and type are locked">
+                                        <Lock className="w-3.5 h-3.5 text-slate-400" />
+                                      </span>
+                                    )}
+                                    <span
+                                      className={`px-2 py-0.5 rounded-full text-[11px] font-medium ${
+                                        account.is_active
+                                          ? 'bg-[#1ebcb2]/10 text-[#1ebcb2]'
+                                          : 'bg-slate-100 text-slate-500'
+                                      }`}
+                                    >
+                                      {account.is_active ? 'Active' : 'Inactive'}
+                                    </span>
+                                  </div>
+                                </div>
+
+                                <p className="font-semibold text-slate-900 leading-snug mb-1">
+                                  {account.account_name}
+                                </p>
+
+                                <div className="min-h-[32px] space-y-0.5">
+                                  {account.account_category && (
+                                    <p className="text-xs text-slate-500 capitalize">
+                                      {account.account_category}
+                                    </p>
+                                  )}
+                                  {account.parent_account_id && (
+                                    <p className="text-xs text-slate-400 truncate">
+                                      Under: {accountName(account.parent_account_id)}
+                                    </p>
+                                  )}
+                                </div>
+
+                                {/* Flagged, not hidden: this chart holds cash
+                                    filed as an expense and again as equity,
+                                    which is why the trial balance cannot
+                                    balance. Naming it is the first step to
+                                    fixing it. */}
+                                {mismatched && expected && (
+                                  <div className="mt-2 flex items-start gap-1.5 rounded-lg bg-[#ee7b22]/10 px-2 py-1.5">
+                                    <AlertCircle className="w-3.5 h-3.5 text-[#ee7b22] flex-shrink-0 mt-0.5" />
+                                    <p className="text-[11px] text-[#ee7b22] leading-tight">
+                                      Code {account.account_code} is normally{' '}
+                                      {singularType(expected).toLowerCase()}, but this is filed as{' '}
+                                      {singularType(account.account_type).toLowerCase()}.
+                                    </p>
+                                  </div>
+                                )}
+
+                                <div className="mt-3 flex items-center gap-1 border-t border-slate-100 pt-2.5">
+                                  <button
+                                    type="button"
+                                    onClick={() => openEditForm(account)}
+                                    className="flex-1 inline-flex items-center justify-center gap-1.5 rounded-lg px-2 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-100 hover:text-[#641f60] transition-colors"
+                                  >
+                                    <Pencil className="w-3.5 h-3.5" />
+                                    Edit
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => toggleActive(account)}
+                                    disabled={togglingId === account.id}
+                                    className={`flex-1 inline-flex items-center justify-center gap-1.5 rounded-lg px-2 py-1.5 text-xs font-medium transition-colors disabled:opacity-50 ${
+                                      account.is_active
+                                        ? 'text-slate-600 hover:bg-[#c46040]/10 hover:text-[#c46040]'
+                                        : 'text-slate-600 hover:bg-[#1ebcb2]/10 hover:text-[#1ebcb2]'
+                                    }`}
+                                  >
+                                    {togglingId === account.id ? (
+                                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                    ) : account.is_active ? (
+                                      <>
+                                        <Ban className="w-3.5 h-3.5" />
+                                        Deactivate
+                                      </>
+                                    ) : (
+                                      <>
+                                        <CheckCircle className="w-3.5 h-3.5" />
+                                        Activate
+                                      </>
+                                    )}
+                                  </button>
+                                </div>
+                              </div>
                             </div>
-                            {account.account_category && (
-                              <p className="text-xs text-slate-500">{account.account_category}</p>
-                            )}
-                            {account.parent_account_id && (
-                              <p className="text-xs text-slate-400">
-                                Under: {accountName(account.parent_account_id)}
-                              </p>
-                            )}
-                          </div>
-                          <span
-                            className={`px-2.5 py-1 rounded-full text-xs font-medium flex-shrink-0 ${
-                              account.is_active
-                                ? 'bg-[#1ebcb2]/10 text-[#1ebcb2]'
-                                : 'bg-slate-100 text-slate-500'
-                            }`}
-                          >
-                            {account.is_active ? 'Active' : 'Inactive'}
-                          </span>
-                          <div className="flex items-center gap-1 flex-shrink-0">
-                            <button
-                              type="button"
-                              onClick={() => openEditForm(account)}
-                              className="p-2 rounded-lg text-slate-400 hover:text-[#641f60] hover:bg-slate-100 transition-colors"
-                              aria-label="Edit account"
-                            >
-                              <Pencil className="w-4 h-4" />
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => toggleActive(account)}
-                              disabled={togglingId === account.id}
-                              className="p-2 rounded-lg text-slate-400 hover:text-[#c46040] hover:bg-slate-100 transition-colors disabled:opacity-50"
-                              aria-label={account.is_active ? 'Deactivate account' : 'Activate account'}
-                            >
-                              {togglingId === account.id ? (
-                                <Loader2 className="w-4 h-4 animate-spin" />
-                              ) : account.is_active ? (
-                                <Ban className="w-4 h-4" />
-                              ) : (
-                                <CheckCircle className="w-4 h-4" />
-                              )}
-                            </button>
-                          </div>
-                        </div>
-                      ))
+                          );
+                        })}
+                      </div>
                     )}
                   </div>
                 )}

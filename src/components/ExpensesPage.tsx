@@ -8,6 +8,8 @@ import {
   approveExpense,
   rejectExpense,
   markExpensePaid,
+  fetchPayableFloatAccounts,
+  type PayableFloatAccount,
   deleteExpense,
   type ExpenseCategory,
   type ExpenseRow,
@@ -615,16 +617,67 @@ export function ExpensesPage() {
     }
   };
 
-  const handleMarkPaid = async (id: string) => {
-    setActioningId(id);
+  // Paying an expense now moves real money, so it needs to know WHICH till.
+  // Previously this only flipped a status flag and the float never changed,
+  // which meant the books showed the money gone while the drawer still held
+  // it. Opening a dialog is the cost of that being correct.
+  const [payingExpense, setPayingExpense] = useState<ExpenseRow | null>(null);
+  const [payFloatAccounts, setPayFloatAccounts] = useState<PayableFloatAccount[]>([]);
+  const [payFloatId, setPayFloatId] = useState('');
+  const [payLoadingTills, setPayLoadingTills] = useState(false);
+  const [paySubmitting, setPaySubmitting] = useState(false);
+  const [payError, setPayError] = useState<string | null>(null);
+
+  const openPayDialog = async (exp: ExpenseRow) => {
+    setPayingExpense(exp);
+    setPayFloatId('');
+    setPayError(null);
+    setPayLoadingTills(true);
     try {
-      await markExpensePaid(id);
+      if (!tenant) throw new Error('No institution context.');
+      // Only tills that could actually settle this: same currency, active,
+      // and holding at least the amount. Offering one that would then be
+      // refused by the database would waste the operator's time.
+      const tills = await fetchPayableFloatAccounts(tenant.id, exp.currency, exp.amount);
+      setPayFloatAccounts(tills);
+      if (tills.length === 1) setPayFloatId(tills[0].id);
+    } catch (err) {
+      console.error('Error loading tills:', err);
+      setPayError(err instanceof Error ? err.message : 'Could not load tills');
+      setPayFloatAccounts([]);
+    } finally {
+      setPayLoadingTills(false);
+    }
+  };
+
+  const closePayDialog = () => {
+    setPayingExpense(null);
+    setPayFloatAccounts([]);
+    setPayFloatId('');
+    setPayError(null);
+  };
+
+  const handleConfirmPay = async () => {
+    if (!payingExpense) return;
+    if (!payFloatId) {
+      setPayError('Choose which till this is being paid from.');
+      return;
+    }
+    setPaySubmitting(true);
+    setPayError(null);
+    try {
+      // Debits the till, writes the ledger entry and marks the expense paid
+      // in one database transaction.
+      await markExpensePaid(payingExpense.id, payFloatId);
       await loadData();
+      closePayDialog();
     } catch (err) {
       console.error('Error marking expense paid:', err);
-      setError(err instanceof Error ? err.message : 'Failed to update expense');
+      // Database guards ("Insufficient float. Balance is 5000, expense is
+      // 8000.") are shown as-is: they name the actual problem.
+      setPayError(err instanceof Error ? err.message : 'Failed to pay expense');
     } finally {
-      setActioningId(null);
+      setPaySubmitting(false);
     }
   };
 
@@ -974,7 +1027,7 @@ export function ExpensesPage() {
                             )}
                             {exp.status === 'approved' && canApprove && (
                               <button
-                                onClick={() => handleMarkPaid(exp.id)}
+                                onClick={() => openPayDialog(exp)}
                                 disabled={isActioning}
                                 className="px-2.5 py-1.5 rounded-lg text-xs font-semibold text-white bg-[#641f60] hover:bg-[#4a1646] transition-colors disabled:opacity-50"
                               >
@@ -1064,7 +1117,7 @@ export function ExpensesPage() {
                         )}
                         {exp.status === 'approved' && canApprove && (
                           <button
-                            onClick={() => handleMarkPaid(exp.id)}
+                            onClick={() => openPayDialog(exp)}
                             disabled={isActioning}
                             className="px-2.5 py-1 rounded-md text-[11px] font-semibold text-[#641f60] bg-[#641f60]/5 active:bg-[#641f60]/10"
                           >
@@ -1353,6 +1406,117 @@ export function ExpensesPage() {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Pay expense — choose the till the cash actually leaves */}
+      {payingExpense && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full">
+            <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between">
+              <h2 className="text-lg font-bold text-[#641f60] flex items-center gap-2">
+                <Banknote className="w-5 h-5" />
+                Pay Expense
+              </h2>
+              <button
+                type="button"
+                onClick={closePayDialog}
+                className="p-2 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100"
+                aria-label="Close"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-6 space-y-4">
+              <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg">
+                <p className="text-sm font-medium text-slate-900">{payingExpense.description}</p>
+                {payingExpense.vendor_name && (
+                  <p className="text-xs text-slate-500 mt-0.5">{payingExpense.vendor_name}</p>
+                )}
+                <div className="flex items-center justify-between mt-2 pt-2 border-t border-slate-200">
+                  <span className="text-xs text-slate-500">Amount</span>
+                  <span className="text-lg font-bold text-slate-900">
+                    {payingExpense.currency}{' '}
+                    {Number(payingExpense.amount).toLocaleString(undefined, {
+                      minimumFractionDigits: 2,
+                      maximumFractionDigits: 2,
+                    })}
+                  </span>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">
+                  Pay from which till? *
+                </label>
+                {payLoadingTills ? (
+                  <div className="flex items-center gap-2 px-4 py-2.5 text-sm text-slate-500">
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    Loading tills...
+                  </div>
+                ) : payFloatAccounts.length > 0 ? (
+                  <select
+                    value={payFloatId}
+                    onChange={(e) => setPayFloatId(e.target.value)}
+                    className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#1ebcb2]"
+                  >
+                    <option value="">Choose a till</option>
+                    {payFloatAccounts.map((f) => (
+                      <option key={f.id} value={f.id}>
+                        {f.float_type.replace(/_/g, ' ')} — {f.currency}{' '}
+                        {Number(f.balance).toLocaleString()}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <p className="text-sm text-[#c46040] px-4 py-2.5 bg-[#c46040]/10 border border-[#c46040]/30 rounded-lg">
+                    No active {payingExpense.currency} till holds enough to cover this expense. Top
+                    up a till first, or pay it from a different account.
+                  </p>
+                )}
+                <p className="text-xs text-slate-400 mt-1">
+                  The till is debited and the expense marked paid together, so cash on hand always
+                  matches the books.
+                </p>
+              </div>
+
+              {payError && (
+                <div className="p-3 bg-[#c46040]/10 border border-[#c46040]/30 rounded-lg text-[#c46040] text-sm flex items-start gap-2">
+                  <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+                  {payError}
+                </div>
+              )}
+
+              <div className="flex items-center justify-end gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={closePayDialog}
+                  className="px-4 py-2.5 border border-slate-300 text-slate-700 font-medium rounded-lg hover:bg-slate-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handleConfirmPay}
+                  disabled={paySubmitting || !payFloatId || payFloatAccounts.length === 0}
+                  className="px-6 py-2.5 bg-[#1ebcb2] hover:bg-[#159089] text-white font-medium rounded-lg shadow-lg disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                >
+                  {paySubmitting ? (
+                    <>
+                      <Loader2 className="w-5 h-5 animate-spin" />
+                      Paying...
+                    </>
+                  ) : (
+                    <>
+                      <CheckCircle2 className="w-5 h-5" />
+                      Confirm Payment
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       )}

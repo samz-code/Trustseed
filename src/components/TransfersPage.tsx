@@ -17,8 +17,11 @@ import {
   Globe,
   Send,
   ChevronDown,
+  Printer,
 } from 'lucide-react';
 import { buildApprovalChain } from '../lib/approvalChain';
+import { buildReceiptData, type ReceiptData } from './TransactionReceipt';
+import { VoucherModal, type VoucherExtras } from './TransactionVoucher';
 
 type Transaction = Tables<'transactions'>;
 type Customer = Tables<'customers'>;
@@ -250,8 +253,11 @@ interface TransferForm {
   from_customer_id: string;
   sender_name: string;
   sender_phone: string;
+  sender_address: string;
+  sender_id_number: string;
   receiver_name: string;
   receiver_phone: string;
+  receiver_city: string;
   destination_country: string;
   amount: string;
   currency: string;
@@ -263,8 +269,11 @@ const EMPTY_FORM: TransferForm = {
   from_customer_id: '',
   sender_name: '',
   sender_phone: '',
+  sender_address: '',
+  sender_id_number: '',
   receiver_name: '',
   receiver_phone: '',
+  receiver_city: '',
   destination_country: '',
   amount: '',
   currency: 'KES',
@@ -309,10 +318,66 @@ export function TransfersPage() {
   const [formError, setFormError] = useState<string | null>(null);
   const [actioningId, setActioningId] = useState<string | null>(null);
 
+  // Remittance voucher — auto-opens after a transfer is created, and can be
+  // reopened for any existing transfer via the Voucher action on its row.
+  const [voucher, setVoucher] = useState<{ data: ReceiptData; extras: VoucherExtras } | null>(null);
+
   const complianceThreshold = useMemo(() => {
     const settings = tenant?.settings as { compliance?: { large_transaction_threshold?: number } } | null;
     return settings?.compliance?.large_transaction_threshold ?? LARGE_TRANSACTION_THRESHOLD;
   }, [tenant]);
+
+  // Institution details printed in the voucher header. Stored on the tenant
+  // record (Settings > General), so each institution prints its own.
+  const institutionDetails = useMemo(() => {
+    const settings = tenant?.settings as
+      | { address?: string | null; phone?: string | null; branding?: { logo_url?: string | null } }
+      | null;
+    return {
+      address: settings?.address ?? null,
+      phone: settings?.phone ?? null,
+      logoUrl: settings?.branding?.logo_url ?? null,
+    };
+  }, [tenant]);
+
+  // Builds the voucher from a REAL transactions row (freshly created or
+  // stored), so everything printed comes from the database.
+  const openVoucherForTransfer = useCallback(
+    (tx: Transaction) => {
+      if (!tenant) return;
+      const data = buildReceiptData({
+        institutionName: tenant.name,
+        institutionLogoUrl: institutionDetails.logoUrl,
+        branchName: branch?.name ?? null,
+        transactionId: tx.id,
+        reference: tx.reference,
+        transactionType: tx.transaction_type,
+        status: tx.status,
+        createdAtIso: tx.created_at,
+        senderName: tx.sender_name,
+        senderPhone: tx.sender_phone,
+        receiverName: tx.receiver_name,
+        receiverPhone: tx.receiver_phone,
+        amount: tx.amount,
+        currency: tx.currency,
+        chargesAmount: tx.fee_amount,
+        chargesCurrency: tx.fee_currency ?? tx.currency,
+        exchangeRate: tx.exchange_rate,
+        cashierName: admin?.full_name ?? null,
+      });
+      const extras: VoucherExtras = {
+        institutionAddress: institutionDetails.address,
+        institutionPhone: institutionDetails.phone,
+        senderAddress: tx.sender_address,
+        senderIdNumber: tx.sender_id_number,
+        receiverCity: tx.receiver_city,
+        receiverCountry: tx.destination_country,
+        purpose: tx.purpose,
+      };
+      setVoucher({ data, extras });
+    },
+    [tenant, branch, admin, institutionDetails]
+  );
 
   const loadData = useCallback(async () => {
     if (!tenant) return;
@@ -354,6 +419,39 @@ export function TransfersPage() {
   useEffect(() => {
     loadData();
   }, [loadData]);
+
+  // Volume and exposure across the transfers currently loaded.
+  const summary = useMemo(() => {
+    const pending = transfers.filter(
+      (t) => t.status === 'pending' || t.status === 'approved' || t.status === 'processing'
+    );
+    const completed = transfers.filter((t) => t.status === 'completed');
+    const flagged = transfers.filter(
+      (t) => t.requires_compliance_check && t.compliance_status !== 'cleared'
+    );
+    const international = transfers.filter((t) => t.is_international);
+
+    // Value is only summed within a currency; a mixed total would be
+    // meaningless. Falls back to counting when the book spans several.
+    const currencies = new Set(transfers.map((t) => t.currency));
+    const singleCurrency = currencies.size === 1 ? Array.from(currencies)[0] : null;
+    const pendingValue = singleCurrency
+      ? pending.reduce((sum, t) => sum + Number(t.amount || 0), 0)
+      : null;
+    const feesEarned = singleCurrency
+      ? completed.reduce((sum, t) => sum + Number(t.fee_amount || 0), 0)
+      : null;
+
+    return {
+      pendingCount: pending.length,
+      pendingValue,
+      completedCount: completed.length,
+      feesEarned,
+      flaggedCount: flagged.length,
+      internationalCount: international.length,
+      singleCurrency,
+    };
+  }, [transfers]);
 
   const filteredTransfers = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
@@ -438,7 +536,10 @@ export function TransfersPage() {
         sender_phone: formData.sender_phone.trim() || selectedCustomer?.phone || null,
         receiver_name: formData.receiver_name.trim(),
         receiver_phone: formData.receiver_phone.trim() || null,
+        receiver_city: formData.receiver_city.trim() || null,
         destination_country: formData.destination_country.trim() || null,
+        sender_address: formData.sender_address.trim() || selectedCustomer?.address || null,
+        sender_id_number: formData.sender_id_number.trim() || selectedCustomer?.id_number || null,
         purpose: formData.purpose.trim() || null,
         notes: formData.notes.trim() || null,
         is_international: isInternational,
@@ -475,6 +576,12 @@ export function TransfersPage() {
 
       await loadData();
       closeForm();
+
+      // Print the voucher straight from the row the database returned, so the
+      // reference and every printed field come from the stored record.
+      if (createdTx) {
+        openVoucherForTransfer(createdTx);
+      }
     } catch (err) {
       console.error('Error creating transfer:', err);
       setFormError(err instanceof Error ? err.message : 'Failed to create transfer');
@@ -557,12 +664,11 @@ export function TransfersPage() {
         </button>
       </div>
 
-      <div className="bg-[#641f60]/5 border border-[#641f60]/20 rounded-xl p-3.5 sm:p-4 text-sm text-[#641f60] flex items-start gap-3">
-        <ShieldAlert className="w-5 h-5 flex-shrink-0 mt-0.5" />
+      <div className="bg-[#641f60]/5 border border-[#641f60]/20 rounded-xl px-4 py-3 text-sm text-[#641f60] flex items-start gap-2.5">
+        <ShieldAlert className="w-4 h-4 flex-shrink-0 mt-0.5" />
         <p>
-          Transfers flagged as international or above {formatMoney(complianceThreshold)} require compliance
-          review before they can be completed. This page records the transfer and its compliance flag;
-          full multi-level approval routing is handled separately once your Approvals workflow is configured.
+          International transfers and any above {formatMoney(complianceThreshold)} need compliance
+          review before completion.
         </p>
       </div>
 
@@ -582,6 +688,66 @@ export function TransfersPage() {
             <RefreshCw className="w-4 h-4" />
             Retry
           </button>
+        </div>
+      )}
+
+      {!loading && transfers.length > 0 && (
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+          <div className="group bg-white rounded-xl border border-slate-200 p-5 transition-all duration-200 hover:shadow-lg hover:shadow-slate-200/60 hover:-translate-y-0.5 hover:border-[#ee7b22]/40">
+            <div className="flex items-center justify-between mb-3">
+              <div className="w-10 h-10 rounded-lg bg-[#ee7b22]/10 flex items-center justify-center transition-colors group-hover:bg-[#ee7b22]/20">
+                <Clock className="w-5 h-5 text-[#ee7b22]" />
+              </div>
+            </div>
+            <p className="text-xs font-medium text-slate-500 mb-1">In flight</p>
+            <p className="text-2xl font-bold text-[#ee7b22] tabular-nums">{summary.pendingCount}</p>
+            {summary.pendingValue !== null && summary.singleCurrency && (
+              <p className="text-[11px] text-slate-400 mt-1 tabular-nums">
+                {formatMoney(summary.pendingValue, summary.singleCurrency)}
+              </p>
+            )}
+          </div>
+
+          <div className="group bg-white rounded-xl border border-slate-200 p-5 transition-all duration-200 hover:shadow-lg hover:shadow-slate-200/60 hover:-translate-y-0.5 hover:border-[#1ebcb2]/40">
+            <div className="flex items-center justify-between mb-3">
+              <div className="w-10 h-10 rounded-lg bg-[#1ebcb2]/10 flex items-center justify-center transition-colors group-hover:bg-[#1ebcb2]/20">
+                <CheckCircle className="w-5 h-5 text-[#1ebcb2]" />
+              </div>
+            </div>
+            <p className="text-xs font-medium text-slate-500 mb-1">Completed</p>
+            <p className="text-2xl font-bold text-[#159089] tabular-nums">
+              {summary.completedCount}
+            </p>
+            {summary.feesEarned !== null && summary.singleCurrency && (
+              <p className="text-[11px] text-slate-400 mt-1 tabular-nums">
+                {formatMoney(summary.feesEarned, summary.singleCurrency)} in fees
+              </p>
+            )}
+          </div>
+
+          <div className="group bg-white rounded-xl border border-slate-200 p-5 transition-all duration-200 hover:shadow-lg hover:shadow-slate-200/60 hover:-translate-y-0.5 hover:border-[#c46040]/40">
+            <div className="flex items-center justify-between mb-3">
+              <div className="w-10 h-10 rounded-lg bg-[#c46040]/10 flex items-center justify-center transition-colors group-hover:bg-[#c46040]/20">
+                <ShieldAlert className="w-5 h-5 text-[#c46040]" />
+              </div>
+            </div>
+            <p className="text-xs font-medium text-slate-500 mb-1">Awaiting compliance</p>
+            <p className="text-2xl font-bold text-[#c46040] tabular-nums">
+              {summary.flaggedCount}
+            </p>
+          </div>
+
+          <div className="group bg-white rounded-xl border border-slate-200 p-5 transition-all duration-200 hover:shadow-lg hover:shadow-slate-200/60 hover:-translate-y-0.5 hover:border-[#641f60]/30">
+            <div className="flex items-center justify-between mb-3">
+              <div className="w-10 h-10 rounded-lg bg-[#641f60]/10 flex items-center justify-center transition-colors group-hover:bg-[#641f60]/15">
+                <Globe className="w-5 h-5 text-[#641f60]" />
+              </div>
+            </div>
+            <p className="text-xs font-medium text-slate-500 mb-1">International</p>
+            <p className="text-2xl font-bold text-[#641f60] tabular-nums">
+              {summary.internationalCount}
+            </p>
+          </div>
         </div>
       )}
 
@@ -614,92 +780,151 @@ export function TransfersPage() {
         </div>
       </div>
 
-      {/* Transfer list */}
-      <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
-        {loading ? (
-          <div className="flex items-center justify-center py-12">
-            <Loader2 className="w-8 h-8 animate-spin text-[#641f60]" />
-          </div>
-        ) : filteredTransfers.length > 0 ? (
-          <div className="divide-y divide-slate-100">
-            {filteredTransfers.map((transfer) => {
-              const canAct = transfer.status === 'pending' || transfer.status === 'approved';
-              return (
-                <div key={transfer.id} className="px-4 sm:px-6 py-4 hover:bg-slate-50 transition-colors">
-                  <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3 sm:gap-4">
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2 sm:gap-3 flex-wrap">
-                        <span className="font-mono text-xs sm:text-sm text-slate-500 truncate">{transfer.reference}</span>
-                        {getStatusBadge(transfer.status)}
-                        {transfer.is_international && (
-                          <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-[#641f60]/10 text-[#641f60] text-xs font-medium rounded-full">
-                            <Globe className="w-3 h-3" />
-                            International
-                          </span>
-                        )}
-                        {transfer.requires_compliance_check && (
-                          <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-[#c46040]/10 text-[#c46040] text-xs font-medium rounded-full">
-                            <ShieldAlert className="w-3 h-3" />
-                            Compliance {transfer.compliance_status ?? 'pending'}
-                          </span>
-                        )}
-                      </div>
-                      <p className="font-semibold text-slate-900 mt-1.5 truncate">
-                        {transfer.sender_name || 'Unknown sender'} &rarr; {transfer.receiver_name || 'Unknown receiver'}
-                      </p>
-                      <div className="flex items-center gap-1.5 mt-1 flex-wrap">
-                        <CurrencyBadge code={transfer.currency} size={16} />
-                        <p className="text-sm text-slate-600">
-                          {formatMoney(transfer.amount, transfer.currency)}
-                          {transfer.fee_amount > 0 && ` (+${formatMoney(transfer.fee_amount, transfer.currency)} fee)`}
-                          {transfer.destination_country && ` \u2192 ${transfer.destination_country}`}
-                        </p>
-                      </div>
-                      {transfer.purpose && <p className="text-sm text-slate-500 mt-1 truncate">{transfer.purpose}</p>}
+      {loading ? (
+        <div className="grid sm:grid-cols-2 xl:grid-cols-3 gap-4">
+          {Array.from({ length: 6 }).map((_, i) => (
+            <div key={i} className="bg-white rounded-xl border border-slate-200 p-5 animate-pulse">
+              <div className="h-3 w-24 bg-slate-200 rounded mb-3" />
+              <div className="h-4 w-40 bg-slate-200 rounded mb-2" />
+              <div className="h-6 w-28 bg-slate-100 rounded" />
+            </div>
+          ))}
+        </div>
+      ) : filteredTransfers.length > 0 ? (
+        <div className="grid sm:grid-cols-2 xl:grid-cols-3 gap-4">
+          {filteredTransfers.map((transfer) => {
+            const canAct = transfer.status === 'pending' || transfer.status === 'approved';
+            const flagged =
+              transfer.requires_compliance_check && transfer.compliance_status !== 'cleared';
+
+            return (
+              <div
+                key={transfer.id}
+                className={`group flex flex-col bg-white rounded-xl border transition-all duration-200 hover:shadow-lg hover:shadow-slate-200/50 hover:-translate-y-0.5 ${
+                  flagged
+                    ? 'border-[#c46040]/30 hover:border-[#c46040]/50'
+                    : 'border-slate-200 hover:border-[#641f60]/30'
+                }`}
+              >
+                <div className="p-5 flex-1">
+                  <div className="flex items-start justify-between gap-2 mb-3">
+                    <span className="font-mono text-[11px] text-slate-400 truncate">
+                      {transfer.reference}
+                    </span>
+                    {getStatusBadge(transfer.status)}
+                  </div>
+
+                  {/* Sender and receiver stacked rather than inline: on a
+                      narrow card the arrow form truncates both names. */}
+                  <div className="mb-4">
+                    <p className="text-sm font-semibold text-slate-900 truncate">
+                      {transfer.sender_name || 'Unknown sender'}
+                    </p>
+                    <div className="flex items-center gap-1.5 my-1">
+                      <ArrowRightLeft className="w-3 h-3 text-slate-300 flex-shrink-0" />
+                      <span className="h-px flex-1 bg-slate-100" />
                     </div>
-                    {canAct && (
-                      <div className="flex items-center gap-2 flex-shrink-0">
-                        <button
-                          onClick={() => handleComplete(transfer)}
-                          disabled={actioningId === transfer.id}
-                          className="flex-1 sm:flex-initial inline-flex items-center justify-center gap-1.5 px-3 py-1.5 bg-[#1ebcb2] hover:bg-[#641f60] text-white text-xs font-medium rounded-lg transition-colors disabled:opacity-50"
-                        >
-                          {actioningId === transfer.id ? (
-                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                          ) : (
-                            <Send className="w-3.5 h-3.5" />
-                          )}
-                          Complete
-                        </button>
-                        <button
-                          onClick={() => handleCancel(transfer)}
-                          disabled={actioningId === transfer.id}
-                          className="flex-1 sm:flex-initial inline-flex items-center justify-center gap-1.5 px-3 py-1.5 border border-slate-300 text-slate-600 hover:bg-slate-50 text-xs font-medium rounded-lg transition-colors disabled:opacity-50"
-                        >
-                          <XCircle className="w-3.5 h-3.5" />
-                          Cancel
-                        </button>
-                      </div>
+                    <p className="text-sm font-semibold text-slate-900 truncate">
+                      {transfer.receiver_name || 'Unknown receiver'}
+                    </p>
+                    {transfer.destination_country && (
+                      <p className="text-[11px] text-slate-400 mt-1 truncate">
+                        to {transfer.destination_country}
+                      </p>
                     )}
                   </div>
+
+                  <div className="flex items-end justify-between gap-3 pt-3 border-t border-slate-100">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-1.5 mb-0.5">
+                        <CurrencyBadge code={transfer.currency} size={14} />
+                        <span className="text-[11px] font-medium text-slate-400">
+                          {transfer.currency}
+                        </span>
+                      </div>
+                      <p className="text-lg font-bold text-slate-900 tabular-nums truncate">
+                        {formatMoney(transfer.amount, transfer.currency)}
+                      </p>
+                      {transfer.fee_amount > 0 && (
+                        <p className="text-[11px] text-slate-400 tabular-nums">
+                          +{formatMoney(transfer.fee_amount, transfer.currency)} fee
+                        </p>
+                      )}
+                    </div>
+                    <div className="flex flex-col items-end gap-1 flex-shrink-0">
+                      {transfer.is_international && (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-[#641f60]/10 text-[#641f60] text-[10px] font-medium rounded">
+                          <Globe className="w-3 h-3" />
+                          International
+                        </span>
+                      )}
+                      {flagged && (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-[#c46040]/10 text-[#c46040] text-[10px] font-medium rounded">
+                          <ShieldAlert className="w-3 h-3" />
+                          {transfer.compliance_status ?? 'pending'}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  {transfer.purpose && (
+                    <p className="text-[11px] text-slate-400 mt-3 line-clamp-2">
+                      {transfer.purpose}
+                    </p>
+                  )}
                 </div>
-              );
-            })}
+
+                <div className="flex items-center gap-1.5 px-3 py-2.5 border-t border-slate-100">
+                  <button
+                    onClick={() => openVoucherForTransfer(transfer)}
+                    className="flex-1 inline-flex items-center justify-center gap-1.5 px-2 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-100 rounded-lg transition-colors"
+                    title="Print remittance voucher"
+                  >
+                    <Printer className="w-3.5 h-3.5" />
+                    Voucher
+                  </button>
+                  {canAct && (
+                    <>
+                      <button
+                        onClick={() => handleComplete(transfer)}
+                        disabled={actioningId === transfer.id}
+                        className="flex-1 inline-flex items-center justify-center gap-1.5 px-2 py-1.5 bg-[#1ebcb2] hover:bg-[#159089] text-white text-xs font-semibold rounded-lg transition-all duration-200 hover:shadow-md hover:shadow-[#1ebcb2]/25 active:scale-[0.97] disabled:opacity-50"
+                      >
+                        {actioningId === transfer.id ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <Send className="w-3.5 h-3.5" />
+                        )}
+                        Complete
+                      </button>
+                      <button
+                        onClick={() => handleCancel(transfer)}
+                        disabled={actioningId === transfer.id}
+                        className="inline-flex items-center justify-center px-2 py-1.5 text-slate-400 hover:text-[#c46040] hover:bg-[#c46040]/10 rounded-lg transition-colors disabled:opacity-50"
+                        title="Cancel transfer"
+                      >
+                        <XCircle className="w-4 h-4" />
+                      </button>
+                    </>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        <div className="bg-white rounded-xl border border-slate-200 flex flex-col items-center justify-center py-16 px-4">
+          <div className="w-16 h-16 rounded-full bg-[#641f60]/5 flex items-center justify-center mb-4">
+            <ArrowRightLeft className="w-8 h-8 text-[#641f60]/40" />
           </div>
-        ) : (
-          <div className="flex flex-col items-center justify-center py-12 px-4">
-            <div className="w-16 h-16 rounded-full bg-slate-100 flex items-center justify-center mb-4">
-              <ArrowRightLeft className="w-8 h-8 text-slate-400" />
-            </div>
-            <h3 className="text-lg font-semibold text-slate-900 mb-1">No transfers found</h3>
-            <p className="text-slate-500 text-center max-w-sm">
-              {searchQuery || statusFilter !== 'all'
-                ? 'No transfers match your search or filter.'
-                : 'Create your first money transfer to get started.'}
-            </p>
-          </div>
-        )}
-      </div>
+          <h3 className="text-lg font-semibold text-slate-900 mb-1">No transfers found</h3>
+          <p className="text-slate-500 text-center max-w-sm text-sm">
+            {searchQuery || statusFilter !== 'all'
+              ? 'No transfers match your search or filter.'
+              : 'Create your first money transfer to get started.'}
+          </p>
+        </div>
+      )}
 
       {/* New Transfer Modal — bottom sheet on mobile, centered dialog on desktop,
           fixed header/footer with a scrollable body so it's always reachable
@@ -741,6 +966,8 @@ export function TransfersPage() {
                           from_customer_id: e.target.value,
                           sender_name: customer ? customerName(customer) : prev.sender_name,
                           sender_phone: customer?.phone ?? prev.sender_phone,
+                          sender_address: customer?.address ?? prev.sender_address,
+                          sender_id_number: customer?.id_number ?? prev.sender_id_number,
                         }));
                       }}
                       className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#1ebcb2] focus:border-transparent"
@@ -760,6 +987,35 @@ export function TransfersPage() {
                       value={formData.sender_name}
                       onChange={(e) => setFormData((prev) => ({ ...prev, sender_name: e.target.value }))}
                       className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#1ebcb2] focus:border-transparent"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">Sender Phone</label>
+                    <input
+                      type="tel"
+                      value={formData.sender_phone}
+                      onChange={(e) => setFormData((prev) => ({ ...prev, sender_phone: e.target.value }))}
+                      className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#1ebcb2] focus:border-transparent"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">Sender ID Number</label>
+                    <input
+                      type="text"
+                      value={formData.sender_id_number}
+                      onChange={(e) => setFormData((prev) => ({ ...prev, sender_id_number: e.target.value }))}
+                      className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#1ebcb2] focus:border-transparent"
+                      placeholder="ID / Passport number"
+                    />
+                  </div>
+                  <div className="sm:col-span-2">
+                    <label className="block text-sm font-medium text-slate-700 mb-1">Sender Address</label>
+                    <input
+                      type="text"
+                      value={formData.sender_address}
+                      onChange={(e) => setFormData((prev) => ({ ...prev, sender_address: e.target.value }))}
+                      className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#1ebcb2] focus:border-transparent"
+                      placeholder="Printed on the remittance voucher"
                     />
                   </div>
                 </div>
@@ -787,18 +1043,28 @@ export function TransfersPage() {
                       className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#1ebcb2] focus:border-transparent"
                     />
                   </div>
-                </div>
-                <div className="mt-4">
-                  <label className="block text-sm font-medium text-slate-700 mb-1">Destination Country</label>
-                  <input
-                    type="text"
-                    value={formData.destination_country}
-                    onChange={(e) =>
-                      setFormData((prev) => ({ ...prev, destination_country: e.target.value }))
-                    }
-                    className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#1ebcb2] focus:border-transparent"
-                    placeholder="Leave blank for domestic transfers"
-                  />
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">Receiver City</label>
+                    <input
+                      type="text"
+                      value={formData.receiver_city}
+                      onChange={(e) => setFormData((prev) => ({ ...prev, receiver_city: e.target.value }))}
+                      className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#1ebcb2] focus:border-transparent"
+                      placeholder="e.g. Nairobi"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">Destination Country</label>
+                    <input
+                      type="text"
+                      value={formData.destination_country}
+                      onChange={(e) =>
+                        setFormData((prev) => ({ ...prev, destination_country: e.target.value }))
+                      }
+                      className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#1ebcb2] focus:border-transparent"
+                      placeholder="Leave blank for domestic transfers"
+                    />
+                  </div>
                 </div>
               </div>
 
@@ -916,6 +1182,16 @@ export function TransfersPage() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Remittance voucher — auto-opens after a transfer is created, or
+          reopened from the Voucher action on any transfer row. */}
+      {voucher && (
+        <VoucherModal
+          data={voucher.data}
+          extras={voucher.extras}
+          onClose={() => setVoucher(null)}
+        />
       )}
     </div>
   );

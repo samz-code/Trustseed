@@ -11,6 +11,7 @@ import {
   Loader2,
   RefreshCcw,
   Plus,
+  Minus,
   X,
   Pencil,
   Trash2,
@@ -373,6 +374,22 @@ function ledgerCustomerLabel(t: LedgerTransaction, customerNames: Record<string,
   return t.transaction_type === 'float_allocation' ? 'Capital injection (no customer)' : 'No customer linked';
 }
 
+// Which wallet the money left and which it entered. A float account is the
+// till; the wallet is the member's balance on the other side of the counter.
+// Showing only customer names leaves an operator unable to answer "which of
+// this member's three wallets was debited".
+function ledgerWalletLabel(
+  t: LedgerTransaction,
+  walletLabels: Record<string, string>
+): string | null {
+  const from = t.from_wallet_id ? walletLabels[t.from_wallet_id] : undefined;
+  const to = t.to_wallet_id ? walletLabels[t.to_wallet_id] : undefined;
+  if (from && to) return `${from} \u2192 ${to}`;
+  if (from) return `From ${from}`;
+  if (to) return `To ${to}`;
+  return null;
+}
+
 function ledgerStatusBadge(status: string) {
   const map: Record<string, { cls: string; Icon: LucideIcon }> = {
     pending: { cls: 'bg-[#ee7b22]/10 text-[#ee7b22]', Icon: Clock },
@@ -497,6 +514,7 @@ export function FloatPage() {
   // Activity ledger for whichever account is currently open in the detail
   // panel — which customers' transactions actually moved through it.
   const [accountTransactions, setAccountTransactions] = useState<LedgerTransaction[]>([]);
+  const [ledgerWalletLabels, setLedgerWalletLabels] = useState<Record<string, string>>({});
   const [ledgerCustomerNames, setLedgerCustomerNames] = useState<Record<string, string>>({});
   const [loadingLedger, setLoadingLedger] = useState(false);
   const [ledgerError, setLedgerError] = useState<string | null>(null);
@@ -509,6 +527,20 @@ export function FloatPage() {
   const [topUpForm, setTopUpForm] = useState<TopUpForm>(emptyTopUpForm());
   const [topUpSubmitting, setTopUpSubmitting] = useState(false);
   const [topUpError, setTopUpError] = useState<string | null>(null);
+
+  // Withdraw: taking cash out of a till (banking surplus, returning capital).
+  const [withdrawAccount, setWithdrawAccount] = useState<FloatAccount | null>(null);
+  const [withdrawForm, setWithdrawForm] = useState<TopUpForm>(emptyTopUpForm());
+  const [withdrawSubmitting, setWithdrawSubmitting] = useState(false);
+  const [withdrawError, setWithdrawError] = useState<string | null>(null);
+
+  // Transfer: moving float between two tills, e.g. cash drawer -> M-Pesa till.
+  const [transferFrom, setTransferFrom] = useState<FloatAccount | null>(null);
+  const [transferToId, setTransferToId] = useState('');
+  const [transferAmount, setTransferAmount] = useState('');
+  const [transferNotes, setTransferNotes] = useState('');
+  const [transferSubmitting, setTransferSubmitting] = useState(false);
+  const [transferError, setTransferError] = useState<string | null>(null);
 
   useEffect(() => {
     if (tenant) loadData();
@@ -584,11 +616,45 @@ export function FloatPage() {
         } else {
           setLedgerCustomerNames({});
         }
+
+        // Wallets referenced by these movements. Resolved separately from
+        // customers because a transaction can name a wallet without naming a
+        // customer id, and vice versa.
+        const walletIds = new Set<string>();
+        rows.forEach((t) => {
+          if (t.from_wallet_id) walletIds.add(t.from_wallet_id);
+          if (t.to_wallet_id) walletIds.add(t.to_wallet_id);
+        });
+
+        if (walletIds.size > 0) {
+          const { data: walletRows, error: walletError } = await supabase
+            .from('wallets')
+            .select('id, account_number, wallet_type, currency')
+            .in('id', Array.from(walletIds));
+          if (walletError) throw walletError;
+          const wmap: Record<string, string> = {};
+          (walletRows ?? []).forEach((w: {
+            id: string;
+            account_number?: string | null;
+            wallet_type?: string | null;
+            currency?: string | null;
+          }) => {
+            // Prefer the account number a member would recognise; fall back to
+            // the type so the label is never an empty string.
+            const label =
+              w.account_number || (w.wallet_type ? w.wallet_type.replace(/_/g, ' ') : 'wallet');
+            wmap[w.id] = w.currency ? `${label} (${w.currency})` : label;
+          });
+          setLedgerWalletLabels(wmap);
+        } else {
+          setLedgerWalletLabels({});
+        }
       } catch (err) {
         console.error('Error loading float account activity:', err);
         setLedgerError(err instanceof Error ? err.message : 'Failed to load recent activity');
         setAccountTransactions([]);
         setLedgerCustomerNames({});
+        setLedgerWalletLabels({});
       } finally {
         setLoadingLedger(false);
       }
@@ -602,6 +668,7 @@ export function FloatPage() {
     } else {
       setAccountTransactions([]);
       setLedgerCustomerNames({});
+      setLedgerWalletLabels({});
       setLedgerError(null);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -769,49 +836,28 @@ export function FloatPage() {
 
     setTopUpSubmitting(true);
     try {
-      // Re-read the current balance immediately before writing, so two
-      // top-ups submitted close together don't clobber each other. This is
-      // still a read-then-write, not a true atomic increment — for high
-      // concurrency, move this to a Postgres function that does
-      // `balance = balance + amount` in a single statement.
-      const { data: freshAccount, error: fetchError } = await supabase
-        .from('float_accounts')
-        .select('balance')
-        .eq('id', topUpAccount.id)
-        .eq('tenant_id', tenant.id)
-        .single();
-      if (fetchError) throw fetchError;
-
-      const newBalance = Number(freshAccount.balance || 0) + amount;
-
-      const { error: updateError } = await supabase
-        .from('float_accounts')
-        .update({ balance: newBalance } as never)
-        .eq('id', topUpAccount.id)
-        .eq('tenant_id', tenant.id);
-      if (updateError) throw updateError;
-
-      // Record the movement itself — same transaction_type Transactions uses
-      // for a manual float top-up, so this shows up in the ledger either way.
-      const { error: txError } = await supabase.from('transactions').insert({
-        tenant_id: tenant.id,
-        branch_id: topUpAccount.branch_id,
-        transaction_type: 'float_allocation',
-        amount,
-        currency: topUpAccount.currency,
-        float_account_id: topUpAccount.id,
-        payment_source: topUpForm.source,
-        notes: topUpForm.notes.trim() || `Capital injection into ${floatTypeLabel(topUpAccount.float_type)}`,
-        status: 'approved',
-        created_by: admin.id,
+      // Atomic: float_topup() locks the row, adds the amount and writes the
+      // ledger entry in ONE database transaction.
+      //
+      // This replaces a read-then-write that could silently destroy money:
+      // two tellers topping up at the same moment would both read the old
+      // balance and the second write would erase the first. It also removes
+      // the case where the balance moved but the audit record failed to
+      // save, which previously left the UI asking the user to note it by
+      // hand. Now either both land or neither does.
+      const { data: result, error: rpcError } = await supabase.rpc('float_topup', {
+        p_float_account_id: topUpAccount.id,
+        p_amount: amount,
+        p_payment_source: topUpForm.source,
+        p_notes:
+          topUpForm.notes.trim() ||
+          `Capital injection into ${floatTypeLabel(topUpAccount.float_type)}`,
       } as never);
-      if (txError) {
-        // The balance already moved; surface this clearly rather than
-        // silently losing the audit trail for this top-up.
-        throw new Error(
-          `Funds were added, but the transaction record failed to save (${txError.message}). Please note this manually.`
-        );
-      }
+      // Database-side guards (insufficient float, inactive account, wrong
+      // institution) come back as errors here and are shown verbatim, since
+      // they say exactly what went wrong.
+      if (rpcError) throw rpcError;
+      void result;
 
       await loadData();
       closeTopUp();
@@ -820,6 +866,136 @@ export function FloatPage() {
       setTopUpError(err instanceof Error ? err.message : 'Failed to add funds');
     } finally {
       setTopUpSubmitting(false);
+    }
+  };
+
+  const openWithdraw = (account: FloatAccount) => {
+    setWithdrawAccount(account);
+    setWithdrawForm(emptyTopUpForm());
+    setWithdrawError(null);
+  };
+
+  const closeWithdraw = () => {
+    setWithdrawAccount(null);
+    setWithdrawForm(emptyTopUpForm());
+    setWithdrawError(null);
+  };
+
+  const handleWithdraw = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setWithdrawError(null);
+
+    if (!tenant || !admin || !withdrawAccount) {
+      setWithdrawError('Missing institution or admin context. Please sign in again.');
+      return;
+    }
+    const amount = parseFloat(withdrawForm.amount);
+    if (!withdrawForm.amount || Number.isNaN(amount) || amount <= 0) {
+      setWithdrawError('Enter a valid amount to withdraw.');
+      return;
+    }
+    // Checked here for a fast, clear message; the database enforces it too,
+    // so a stale balance on screen cannot let an overdraft through.
+    if (amount > Number(withdrawAccount.balance || 0)) {
+      setWithdrawError(
+        `Only ${formatMoney(Number(withdrawAccount.balance || 0))} ${withdrawAccount.currency} is available in this till.`
+      );
+      return;
+    }
+
+    setWithdrawSubmitting(true);
+    try {
+      const { error: rpcError } = await supabase.rpc('float_withdraw', {
+        p_float_account_id: withdrawAccount.id,
+        p_amount: amount,
+        p_payment_source: withdrawForm.source,
+        p_notes:
+          withdrawForm.notes.trim() ||
+          `Withdrawal from ${floatTypeLabel(withdrawAccount.float_type)}`,
+      } as never);
+      if (rpcError) throw rpcError;
+
+      await loadData();
+      closeWithdraw();
+    } catch (err) {
+      console.error('Error withdrawing funds:', err);
+      setWithdrawError(err instanceof Error ? err.message : 'Failed to withdraw funds');
+    } finally {
+      setWithdrawSubmitting(false);
+    }
+  };
+
+  const openTransfer = (account: FloatAccount) => {
+    setTransferFrom(account);
+    setTransferToId('');
+    setTransferAmount('');
+    setTransferNotes('');
+    setTransferError(null);
+  };
+
+  const closeTransfer = () => {
+    setTransferFrom(null);
+    setTransferToId('');
+    setTransferAmount('');
+    setTransferNotes('');
+    setTransferError(null);
+  };
+
+  // Only tills in the same currency can receive a transfer: moving KES into a
+  // USD till would need a conversion, which is a forex deal, not a transfer.
+  const transferTargets = useMemo(() => {
+    if (!transferFrom) return [];
+    return accounts.filter(
+      (a) =>
+        a.id !== transferFrom.id &&
+        a.currency === transferFrom.currency &&
+        a.status === 'active'
+    );
+  }, [accounts, transferFrom]);
+
+  const handleTransfer = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setTransferError(null);
+
+    if (!tenant || !admin || !transferFrom) {
+      setTransferError('Missing institution or admin context. Please sign in again.');
+      return;
+    }
+    if (!transferToId) {
+      setTransferError('Choose a destination till.');
+      return;
+    }
+    const amount = parseFloat(transferAmount);
+    if (!transferAmount || Number.isNaN(amount) || amount <= 0) {
+      setTransferError('Enter a valid amount to transfer.');
+      return;
+    }
+    if (amount > Number(transferFrom.balance || 0)) {
+      setTransferError(
+        `Only ${formatMoney(Number(transferFrom.balance || 0))} ${transferFrom.currency} is available in this till.`
+      );
+      return;
+    }
+
+    setTransferSubmitting(true);
+    try {
+      // Both legs move inside one database transaction, so money can never
+      // leave one till without arriving in the other.
+      const { error: rpcError } = await supabase.rpc('float_transfer', {
+        p_from_account_id: transferFrom.id,
+        p_to_account_id: transferToId,
+        p_amount: amount,
+        p_notes: transferNotes.trim() || 'Float transfer between tills',
+      } as never);
+      if (rpcError) throw rpcError;
+
+      await loadData();
+      closeTransfer();
+    } catch (err) {
+      console.error('Error transferring float:', err);
+      setTransferError(err instanceof Error ? err.message : 'Failed to transfer float');
+    } finally {
+      setTransferSubmitting(false);
     }
   };
 
@@ -997,13 +1173,42 @@ export function FloatPage() {
                       </div>
                     </div>
                   </button>
-                  <button
-                    onClick={() => openTopUp(account)}
-                    className="hidden sm:inline-flex items-center gap-1.5 px-3 py-2 bg-[#1ebcb2]/10 hover:bg-[#1ebcb2]/20 text-[#1ebcb2] text-sm font-medium rounded-lg transition-colors flex-shrink-0"
-                  >
-                    <Plus className="w-4 h-4" />
-                    Add Funds
-                  </button>
+                  <div className="hidden sm:flex items-center gap-1.5 flex-shrink-0">
+                    <button
+                      onClick={() => openTopUp(account)}
+                      className="inline-flex items-center gap-1.5 px-3 py-2 bg-[#1ebcb2]/10 hover:bg-[#1ebcb2]/20 text-[#1ebcb2] text-sm font-medium rounded-lg transition-colors"
+                      title="Add capital to this till"
+                    >
+                      <Plus className="w-4 h-4" />
+                      Add
+                    </button>
+                    <button
+                      onClick={() => openWithdraw(account)}
+                      disabled={Number(account.balance || 0) <= 0}
+                      className="inline-flex items-center gap-1.5 px-3 py-2 bg-[#ee7b22]/10 hover:bg-[#ee7b22]/20 text-[#ee7b22] text-sm font-medium rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                      title={
+                        Number(account.balance || 0) <= 0
+                          ? 'Nothing to withdraw'
+                          : 'Take cash out of this till'
+                      }
+                    >
+                      <Minus className="w-4 h-4" />
+                      Withdraw
+                    </button>
+                    <button
+                      onClick={() => openTransfer(account)}
+                      disabled={Number(account.balance || 0) <= 0}
+                      className="inline-flex items-center gap-1.5 px-3 py-2 bg-[#641f60]/10 hover:bg-[#641f60]/20 text-[#641f60] text-sm font-medium rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                      title={
+                        Number(account.balance || 0) <= 0
+                          ? 'Nothing to transfer'
+                          : 'Move float to another till'
+                      }
+                    >
+                      <ArrowRightLeft className="w-4 h-4" />
+                      Move
+                    </button>
+                  </div>
                   <ChevronRight
                     className="w-5 h-5 text-slate-300 flex-shrink-0 hidden sm:block cursor-pointer"
                     onClick={() => setSelectedAccount(account)}
@@ -1356,6 +1561,230 @@ export function FloatPage() {
         </div>
       )}
 
+      {/* Withdraw modal */}
+      {withdrawAccount && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full">
+            <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between">
+              <h2 className="text-lg font-bold text-[#641f60] flex items-center gap-2">
+                <Minus className="w-5 h-5" />
+                Withdraw Funds
+              </h2>
+              <button
+                type="button"
+                onClick={closeWithdraw}
+                className="p-2 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100"
+                aria-label="Close"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleWithdraw} className="p-6 space-y-4">
+              <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg">
+                <p className="text-sm text-slate-500">{floatTypeLabel(withdrawAccount.float_type)}</p>
+                <p className="text-lg font-bold text-slate-900">
+                  {withdrawAccount.currency} {formatMoney(Number(withdrawAccount.balance || 0))}
+                </p>
+                <p className="text-xs text-slate-400">Currently in this till</p>
+              </div>
+
+              <Field label="Amount to withdraw *">
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  max={Number(withdrawAccount.balance || 0)}
+                  required
+                  value={withdrawForm.amount}
+                  onChange={(e) => setWithdrawForm((p) => ({ ...p, amount: e.target.value }))}
+                  className="w-full px-3 py-2.5 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#1ebcb2]"
+                />
+              </Field>
+
+              <Field label="Destination">
+                <div className="grid grid-cols-2 gap-2">
+                  {FUNDING_SOURCES.map((src) => {
+                    const active = withdrawForm.source === src.value;
+                    return (
+                      <button
+                        key={src.value}
+                        type="button"
+                        onClick={() => setWithdrawForm((p) => ({ ...p, source: src.value }))}
+                        className={`flex items-center gap-2 px-3 py-2 rounded-lg border text-sm transition-all ${
+                          active
+                            ? 'border-[#1ebcb2] bg-[#1ebcb2]/10 text-[#641f60] font-medium'
+                            : 'border-slate-200 text-slate-600 hover:border-slate-300'
+                        }`}
+                      >
+                        <src.Icon className="w-4 h-4" />
+                        {src.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </Field>
+
+              <Field label="Notes">
+                <textarea
+                  rows={2}
+                  value={withdrawForm.notes}
+                  onChange={(e) => setWithdrawForm((p) => ({ ...p, notes: e.target.value }))}
+                  placeholder="e.g. banked surplus cash"
+                  className="w-full px-3 py-2.5 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#1ebcb2]"
+                />
+              </Field>
+
+              {withdrawError && (
+                <div className="p-3 bg-[#c46040]/10 border border-[#c46040]/30 rounded-lg text-[#c46040] text-sm flex items-start gap-2">
+                  <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+                  {withdrawError}
+                </div>
+              )}
+
+              <div className="flex items-center justify-end gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={closeWithdraw}
+                  className="px-4 py-2.5 border border-slate-300 text-slate-700 font-medium rounded-lg hover:bg-slate-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={withdrawSubmitting}
+                  className="px-6 py-2.5 bg-[#ee7b22] hover:bg-[#c46040] text-white font-medium rounded-lg shadow-lg disabled:opacity-50 flex items-center gap-2"
+                >
+                  {withdrawSubmitting ? (
+                    <>
+                      <Loader2 className="w-5 h-5 animate-spin" />
+                      Withdrawing...
+                    </>
+                  ) : (
+                    <>
+                      <Minus className="w-5 h-5" />
+                      Withdraw
+                    </>
+                  )}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Transfer between tills */}
+      {transferFrom && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full">
+            <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between">
+              <h2 className="text-lg font-bold text-[#641f60] flex items-center gap-2">
+                <ArrowRightLeft className="w-5 h-5" />
+                Move Float
+              </h2>
+              <button
+                type="button"
+                onClick={closeTransfer}
+                className="p-2 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100"
+                aria-label="Close"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleTransfer} className="p-6 space-y-4">
+              <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg">
+                <p className="text-sm text-slate-500">From: {floatTypeLabel(transferFrom.float_type)}</p>
+                <p className="text-lg font-bold text-slate-900">
+                  {transferFrom.currency} {formatMoney(Number(transferFrom.balance || 0))}
+                </p>
+              </div>
+
+              <Field label="Destination till *">
+                {transferTargets.length > 0 ? (
+                  <select
+                    required
+                    value={transferToId}
+                    onChange={(e) => setTransferToId(e.target.value)}
+                    className="w-full px-3 py-2.5 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#1ebcb2]"
+                  >
+                    <option value="">Choose a till</option>
+                    {transferTargets.map((a) => (
+                      <option key={a.id} value={a.id}>
+                        {floatTypeLabel(a.float_type)} — {a.currency}{' '}
+                        {formatMoney(Number(a.balance || 0))}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <p className="text-sm text-slate-500 px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-lg">
+                    No other active {transferFrom.currency} till to move funds into. Transfers
+                    between different currencies are a forex deal, not a float move.
+                  </p>
+                )}
+              </Field>
+
+              <Field label="Amount *">
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  max={Number(transferFrom.balance || 0)}
+                  required
+                  value={transferAmount}
+                  onChange={(e) => setTransferAmount(e.target.value)}
+                  className="w-full px-3 py-2.5 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#1ebcb2]"
+                />
+              </Field>
+
+              <Field label="Notes">
+                <textarea
+                  rows={2}
+                  value={transferNotes}
+                  onChange={(e) => setTransferNotes(e.target.value)}
+                  placeholder="e.g. topping up the M-Pesa till from the drawer"
+                  className="w-full px-3 py-2.5 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#1ebcb2]"
+                />
+              </Field>
+
+              {transferError && (
+                <div className="p-3 bg-[#c46040]/10 border border-[#c46040]/30 rounded-lg text-[#c46040] text-sm flex items-start gap-2">
+                  <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+                  {transferError}
+                </div>
+              )}
+
+              <div className="flex items-center justify-end gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={closeTransfer}
+                  className="px-4 py-2.5 border border-slate-300 text-slate-700 font-medium rounded-lg hover:bg-slate-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={transferSubmitting || transferTargets.length === 0}
+                  className="px-6 py-2.5 bg-[#641f60] hover:bg-[#4a1646] text-white font-medium rounded-lg shadow-lg disabled:opacity-50 flex items-center gap-2"
+                >
+                  {transferSubmitting ? (
+                    <>
+                      <Loader2 className="w-5 h-5 animate-spin" />
+                      Moving...
+                    </>
+                  ) : (
+                    <>
+                      <ArrowRightLeft className="w-5 h-5" />
+                      Move Funds
+                    </>
+                  )}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
       {/* Account Details Panel */}
       {selectedAccount && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-stretch sm:items-center justify-center p-0 sm:p-4">
@@ -1487,9 +1916,15 @@ export function FloatPage() {
                       const Icon = ledgerTxIcon(t.transaction_type);
                       const iconClasses = ledgerTxIconClasses(t.transaction_type);
                       const debit = isDebitTx(t.transaction_type);
+                      const walletLine = ledgerWalletLabel(t, ledgerWalletLabels);
                       return (
-                        <div key={t.id} className="px-3 py-2.5 flex items-center gap-2.5">
-                          <div className={`w-8 h-8 rounded-lg ${iconClasses.bg} flex items-center justify-center flex-shrink-0`}>
+                        <div
+                          key={t.id}
+                          className="group px-3 py-3 flex items-start gap-2.5 transition-colors duration-150 hover:bg-slate-50"
+                        >
+                          <div
+                            className={`w-8 h-8 rounded-lg ${iconClasses.bg} flex items-center justify-center flex-shrink-0 transition-transform duration-200 group-hover:scale-105`}
+                          >
                             <Icon className={`w-4 h-4 ${iconClasses.color}`} />
                           </div>
                           <div className="flex-1 min-w-0">
@@ -1499,13 +1934,28 @@ export function FloatPage() {
                             <p className="text-xs text-slate-500 truncate">
                               {ledgerCustomerLabel(t, ledgerCustomerNames)}
                             </p>
+                            {/* Only rendered when the movement actually named a
+                                wallet. A cash deposit at the counter touches a
+                                till and a customer but no wallet, and an empty
+                                line there would read as missing data. */}
+                            {walletLine && (
+                              <p className="text-[11px] text-slate-400 truncate mt-0.5 flex items-center gap-1">
+                                <Wallet className="w-3 h-3 flex-shrink-0" />
+                                {walletLine}
+                              </p>
+                            )}
+                            {t.reference && (
+                              <p className="text-[11px] text-slate-300 font-mono truncate mt-0.5">
+                                {t.reference}
+                              </p>
+                            )}
                           </div>
                           <div className="text-right flex-shrink-0">
-                            <p className={`text-sm font-semibold whitespace-nowrap ${debit ? 'text-[#c46040]' : 'text-[#1ebcb2]'}`}>
+                            <p className={`text-sm font-semibold whitespace-nowrap tabular-nums ${debit ? 'text-[#c46040]' : 'text-[#1ebcb2]'}`}>
                               {debit ? '\u2212' : '+'}
                               {t.currency} {formatMoney(t.amount)}
                             </p>
-                            <div className="flex items-center justify-end gap-1.5 mt-0.5">
+                            <div className="flex items-center justify-end gap-1.5 mt-1">
                               <span className="text-[11px] text-slate-400">
                                 {new Date(t.created_at).toLocaleDateString()}
                               </span>

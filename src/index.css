@@ -396,3 +396,102 @@ textarea {
 
 .bg-brand-primary-hover:hover { background-color: var(--brand-primary-dark); }
 .bg-brand-accent-hover:hover { background-color: var(--brand-accent-dark); }
+
+/* ============================================================
+   Receipt printing — LANDSCAPE US LETTER (11in x 8.5in)
+   Used by src/components/Receipt.tsx. Screen preview mimics the
+   printed sheet so what you see matches what prints.
+   ============================================================ */
+.receipt-sheet {
+  width: 11in;
+  min-height: 8.5in;
+  padding: 0.5in;
+  margin: 0 auto;
+  background: #ffffff;
+  color: #000000;
+  font-family: 'Times New Roman', Times, Georgia, serif;
+  font-size: 11pt;
+  line-height: 1.35;
+  box-sizing: border-box;
+}
+
+.receipt-sheet table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.receipt-sheet th,
+.receipt-sheet td {
+  border: 1px solid #000000;
+  padding: 6px 8px;
+  text-align: left;
+  vertical-align: top;
+  font-size: 10pt;
+}
+
+.receipt-sheet th {
+  font-weight: 700;
+}
+
+/* Dotted "fill-in" leader lines, as on a standard remittance voucher. */
+.receipt-dotline {
+  border-bottom: 1px dotted #000000;
+  display: inline-block;
+  min-width: 2.2in;
+}
+
+/* Signature rule */
+.receipt-signline {
+  border-bottom: 1px solid #000000;
+  display: inline-block;
+  min-width: 2.2in;
+  height: 1.1em;
+}
+
+@media print {
+  @page {
+    size: letter landscape;
+    margin: 0.35in;
+  }
+
+  /* Hide the app shell so only the receipt prints. */
+  body * {
+    visibility: hidden !important;
+  }
+
+  .receipt-print-area,
+  .receipt-print-area * {
+    visibility: visible !important;
+  }
+
+  .receipt-print-area {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+  }
+
+  .receipt-sheet {
+    width: 100%;
+    min-height: auto;
+    padding: 0;
+    margin: 0;
+    box-shadow: none !important;
+  }
+
+  /* Never print the on-screen controls. */
+  .receipt-no-print {
+    display: none !important;
+  }
+
+  /* Keep each copy on its own page when printing duplicates. */
+  .receipt-page-break {
+    page-break-before: always;
+  }
+
+  /* Force backgrounds/borders to render. */
+  * {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+}

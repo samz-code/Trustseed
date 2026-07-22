@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useAuth } from '../contexts/AuthContext';
 import { supabase } from '../lib/supabase';
 import type { InsertTables, Tables } from '../lib/supabase';
-import type { Wallet, Customer } from '../types';
+import type { Wallet, Customer, FloatAccount } from '../types';
 import { useCurrency } from '../lib/currency';
 import {
   Plus,
@@ -13,6 +13,7 @@ import {
   Landmark,
   CreditCard,
   Coins,
+  Lock,
   Eye,
   X,
   Loader2,
@@ -521,8 +522,32 @@ export function WalletsPage() {
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
 
+  // Money movement. Before this, a wallet's balance could never change from
+  // the UI at all: only create, status and delete existed.
+  //
+  // Every one of these calls a Postgres function that locks the row, does the
+  // arithmetic and writes the ledger entry in ONE transaction. Doing it in
+  // JavaScript (read balance, add, write back) would let two tellers serving
+  // customers at the same moment silently overwrite each other's work.
+  type MoneyOp = 'deposit' | 'withdraw' | 'transfer';
+  const [moneyOp, setMoneyOp] = useState<MoneyOp | null>(null);
+  const [moneyWallet, setMoneyWallet] = useState<WalletWithCustomer | null>(null);
+  const [moneyAmount, setMoneyAmount] = useState('');
+  const [moneySource, setMoneySource] = useState('cash');
+  const [moneyNotes, setMoneyNotes] = useState('');
+  const [moneyFloatId, setMoneyFloatId] = useState('');
+  const [moneyToWalletId, setMoneyToWalletId] = useState('');
+  const [moneyFee, setMoneyFee] = useState('0');
+  const [moneySubmitting, setMoneySubmitting] = useState(false);
+  const [moneyError, setMoneyError] = useState<string | null>(null);
+
+  // Tills available to pair a cash movement against, so the drawer and the
+  // customer's balance move together.
+  const [floatAccounts, setFloatAccounts] = useState<FloatAccount[]>([]);
+
   // Activity ledger for whichever wallet is currently open in the detail panel.
   const [walletTransactions, setWalletTransactions] = useState<LedgerTransaction[]>([]);
+  const [ledgerFloatLabels, setLedgerFloatLabels] = useState<Record<string, string>>({});
   const [loadingLedger, setLoadingLedger] = useState(false);
   const [ledgerError, setLedgerError] = useState<string | null>(null);
 
@@ -540,24 +565,34 @@ export function WalletsPage() {
     setLoading(true);
     setLoadError(null);
     try {
-      const [walletsRes, customersRes] = await Promise.all([
+      const [walletsRes, customersRes, floatsRes] = await Promise.all([
         supabase
           .from('wallets')
           .select('*, customer:customers(*)')
           .eq('tenant_id', tenant.id)
           .order('created_at', { ascending: false }),
         supabase.from('customers').select('*').eq('tenant_id', tenant.id).eq('status', 'active'),
+        // Tills, so a counter deposit or payout can move the drawer in the
+        // same transaction as the customer's balance.
+        supabase
+          .from('float_accounts')
+          .select('*')
+          .eq('tenant_id', tenant.id)
+          .eq('status', 'active'),
       ]);
       if (walletsRes.error) throw walletsRes.error;
       if (customersRes.error) throw customersRes.error;
+      if (floatsRes.error) throw floatsRes.error;
 
       setAllWallets((walletsRes.data ?? []) as unknown as WalletWithCustomer[]);
       setAllCustomers((customersRes.data ?? []) as Customer[]);
+      setFloatAccounts((floatsRes.data ?? []) as unknown as FloatAccount[]);
     } catch (err) {
       console.error('Error loading wallets:', err);
       setLoadError(err instanceof Error ? err.message : 'Failed to load wallets');
       setAllWallets([]);
       setAllCustomers([]);
+      setFloatAccounts([]);
     } finally {
       setLoading(false);
     }
@@ -608,11 +643,42 @@ export function WalletsPage() {
           .order('created_at', { ascending: false })
           .limit(50);
         if (txError) throw txError;
-        setWalletTransactions((data ?? []) as LedgerTransaction[]);
+        const rows = (data ?? []) as LedgerTransaction[];
+        setWalletTransactions(rows);
+
+        // Which till handled each movement. The reverse of the wallet lookup
+        // on the Float page, so the connection reads from both directions:
+        // from a till you can see whose wallets moved, and from a wallet you
+        // can see which drawer the cash passed through.
+        const floatIds = new Set<string>();
+        rows.forEach((t) => {
+          if (t.float_account_id) floatIds.add(t.float_account_id);
+        });
+
+        if (floatIds.size > 0) {
+          const { data: floatRows, error: floatErr } = await supabase
+            .from('float_accounts')
+            .select('id, float_type, currency')
+            .in('id', Array.from(floatIds));
+          if (floatErr) throw floatErr;
+          const fmap: Record<string, string> = {};
+          (floatRows ?? []).forEach((f: {
+            id: string;
+            float_type?: string | null;
+            currency?: string | null;
+          }) => {
+            const label = f.float_type ? f.float_type.replace(/_/g, ' ') : 'till';
+            fmap[f.id] = f.currency ? `${label} (${f.currency})` : label;
+          });
+          setLedgerFloatLabels(fmap);
+        } else {
+          setLedgerFloatLabels({});
+        }
       } catch (err) {
         console.error('Error loading wallet activity:', err);
         setLedgerError(err instanceof Error ? err.message : 'Failed to load recent activity');
         setWalletTransactions([]);
+        setLedgerFloatLabels({});
       } finally {
         setLoadingLedger(false);
       }
@@ -628,6 +694,7 @@ export function WalletsPage() {
       setConfirmDeleteId(null);
     } else {
       setWalletTransactions([]);
+      setLedgerFloatLabels({});
       setLedgerError(null);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -678,6 +745,40 @@ export function WalletsPage() {
       })),
     [customers]
   );
+
+  // ------------------------------------------------------------------
+  // Book-level position. Currency totals below answer "how much in KES";
+  // these answer "how healthy is the book" — how many wallets are live,
+  // how much of the money is locked, and how many have never moved.
+  // ------------------------------------------------------------------
+  const book = useMemo(() => {
+    const active = wallets.filter((w) => w.status === 'active');
+    const frozen = wallets.filter((w) => w.status !== 'active');
+
+    // Held funds across every currency. Mixing currencies is meaningless as
+    // a total, so this is expressed as a share of balance rather than a sum.
+    const totalBalance = wallets.reduce((sum, w) => sum + Number(w.balance || 0), 0);
+    const totalHeld = wallets.reduce((sum, w) => sum + Number(w.held_balance || 0), 0);
+    const heldShare = totalBalance > 0 ? (totalHeld / totalBalance) * 100 : 0;
+
+    // A wallet with no balance and no holds has either never been funded or
+    // has been emptied. Worth surfacing: it is the population a SACCO chases
+    // for re-activation.
+    const empty = active.filter(
+      (w) => Number(w.balance || 0) === 0 && Number(w.held_balance || 0) === 0
+    ).length;
+
+    const currencies = new Set(wallets.map((w) => w.currency)).size;
+
+    return {
+      total: wallets.length,
+      active: active.length,
+      frozen: frozen.length,
+      empty,
+      heldShare,
+      currencies,
+    };
+  }, [wallets]);
 
   const filteredWallets = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
@@ -805,6 +906,140 @@ export function WalletsPage() {
       setError(err instanceof Error ? err.message : 'Failed to save wallet');
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  // --- Money movement -------------------------------------------------------
+
+  const openMoneyOp = (op: MoneyOp, wallet: WalletWithCustomer) => {
+    setMoneyOp(op);
+    setMoneyWallet(wallet);
+    setMoneyAmount('');
+    setMoneySource('cash');
+    setMoneyNotes('');
+    setMoneyFloatId('');
+    setMoneyToWalletId('');
+    setMoneyFee('0');
+    setMoneyError(null);
+  };
+
+  const closeMoneyOp = () => {
+    setMoneyOp(null);
+    setMoneyWallet(null);
+    setMoneyAmount('');
+    setMoneyNotes('');
+    setMoneyFloatId('');
+    setMoneyToWalletId('');
+    setMoneyFee('0');
+    setMoneyError(null);
+  };
+
+  // Only tills in the wallet's own currency can back a cash movement: paying
+  // KES out of a USD drawer would need a conversion, which is a forex deal.
+  const eligibleFloats = useMemo(() => {
+    if (!moneyWallet) return [];
+    return floatAccounts.filter(
+      (f) => f.currency === moneyWallet.currency && f.status === 'active'
+    );
+  }, [floatAccounts, moneyWallet]);
+
+  // Transfers stay within one currency and cannot target the same wallet.
+  const transferTargetWallets = useMemo(() => {
+    if (!moneyWallet) return [];
+    return allWallets.filter(
+      (w) =>
+        w.id !== moneyWallet.id &&
+        w.currency === moneyWallet.currency &&
+        w.status === 'active'
+    );
+  }, [allWallets, moneyWallet]);
+
+  const handleMoneySubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setMoneyError(null);
+
+    if (!tenant || !moneyWallet || !moneyOp) {
+      setMoneyError('Missing context. Please sign in again.');
+      return;
+    }
+
+    const amount = parseFloat(moneyAmount);
+    if (!moneyAmount || Number.isNaN(amount) || amount <= 0) {
+      setMoneyError('Enter a valid amount.');
+      return;
+    }
+
+    // Checked here for an immediate, specific message. The database enforces
+    // the same rules, so a stale balance on screen still cannot get through.
+    if (moneyOp === 'withdraw' && amount > Number(moneyWallet.available_balance || 0)) {
+      setMoneyError(
+        `Only ${format(Number(moneyWallet.available_balance || 0), moneyWallet.currency)} is available. Held funds cannot be withdrawn.`
+      );
+      return;
+    }
+    if (moneyOp === 'transfer') {
+      if (!moneyToWalletId) {
+        setMoneyError('Choose a destination wallet.');
+        return;
+      }
+      const fee = parseFloat(moneyFee) || 0;
+      if (amount + fee > Number(moneyWallet.available_balance || 0)) {
+        setMoneyError(
+          `Insufficient funds. ${format(amount + fee, moneyWallet.currency)} is needed including the fee, but only ${format(Number(moneyWallet.available_balance || 0), moneyWallet.currency)} is available.`
+        );
+        return;
+      }
+    }
+
+    setMoneySubmitting(true);
+    try {
+      let rpcError = null;
+
+      if (moneyOp === 'deposit') {
+        const { error } = await supabase.rpc('wallet_deposit', {
+          p_wallet_id: moneyWallet.id,
+          p_amount: amount,
+          // Optional: when cash comes over the counter, the till rises in the
+          // same transaction so the drawer and the wallet cannot disagree.
+          p_float_account_id: moneyFloatId || null,
+          p_payment_source: moneySource,
+          p_notes: moneyNotes.trim() || null,
+        } as never);
+        rpcError = error;
+      } else if (moneyOp === 'withdraw') {
+        const { error } = await supabase.rpc('wallet_withdraw', {
+          p_wallet_id: moneyWallet.id,
+          p_amount: amount,
+          p_float_account_id: moneyFloatId || null,
+          p_payment_source: moneySource,
+          p_notes: moneyNotes.trim() || null,
+        } as never);
+        rpcError = error;
+      } else {
+        const { error } = await supabase.rpc('wallet_transfer', {
+          p_from_wallet_id: moneyWallet.id,
+          p_to_wallet_id: moneyToWalletId,
+          p_amount: amount,
+          p_fee: parseFloat(moneyFee) || 0,
+          p_notes: moneyNotes.trim() || null,
+        } as never);
+        rpcError = error;
+      }
+
+      // Database guards ("Insufficient funds. Available is 500, requested
+      // 800.") are shown verbatim: they say exactly what went wrong.
+      if (rpcError) throw rpcError;
+
+      await loadData();
+      if (detailWallet && detailWallet.id === moneyWallet.id) {
+        await loadWalletLedger(moneyWallet.id);
+      }
+      closeMoneyOp();
+    } catch (err) {
+      console.error(`Error on wallet ${moneyOp}:`, err);
+      setMoneyError(err instanceof Error ? err.message : `Failed to ${moneyOp}`);
+    } finally {
+      setMoneySubmitting(false);
     }
   };
 
@@ -936,6 +1171,62 @@ export function WalletsPage() {
             <RefreshCw className="w-4 h-4" />
             Retry
           </button>
+        </div>
+      )}
+
+      {/* ================================================================
+          Book position. Counts and health, above the per-currency money
+          totals — how many wallets, how many live, how much is locked.
+          ================================================================ */}
+      {!loading && wallets.length > 0 && (
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+          <div className="group bg-white rounded-xl border border-slate-200 p-5 transition-all duration-200 hover:shadow-lg hover:shadow-slate-200/60 hover:-translate-y-0.5 hover:border-[#641f60]/30">
+            <div className="flex items-center justify-between mb-3">
+              <div className="w-10 h-10 rounded-lg bg-[#641f60]/10 flex items-center justify-center transition-colors group-hover:bg-[#641f60]/15">
+                <WalletIcon className="w-5 h-5 text-[#641f60]" />
+              </div>
+              <span className="text-xs text-slate-400">
+                {book.currencies} {book.currencies === 1 ? 'currency' : 'currencies'}
+              </span>
+            </div>
+            <p className="text-xs font-medium text-slate-500 mb-1">Total wallets</p>
+            <p className="text-2xl font-bold text-[#641f60] tabular-nums">{book.total}</p>
+          </div>
+
+          <div className="group bg-white rounded-xl border border-slate-200 p-5 transition-all duration-200 hover:shadow-lg hover:shadow-slate-200/60 hover:-translate-y-0.5 hover:border-[#1ebcb2]/40">
+            <div className="flex items-center justify-between mb-3">
+              <div className="w-10 h-10 rounded-lg bg-[#1ebcb2]/10 flex items-center justify-center transition-colors group-hover:bg-[#1ebcb2]/20">
+                <CheckCircle className="w-5 h-5 text-[#1ebcb2]" />
+              </div>
+              {book.frozen > 0 && (
+                <span className="text-xs text-slate-400">{book.frozen} inactive</span>
+              )}
+            </div>
+            <p className="text-xs font-medium text-slate-500 mb-1">Active</p>
+            <p className="text-2xl font-bold text-[#159089] tabular-nums">{book.active}</p>
+          </div>
+
+          <div className="group bg-white rounded-xl border border-slate-200 p-5 transition-all duration-200 hover:shadow-lg hover:shadow-slate-200/60 hover:-translate-y-0.5 hover:border-[#ee7b22]/40">
+            <div className="flex items-center justify-between mb-3">
+              <div className="w-10 h-10 rounded-lg bg-[#ee7b22]/10 flex items-center justify-center transition-colors group-hover:bg-[#ee7b22]/20">
+                <Lock className="w-5 h-5 text-[#ee7b22]" />
+              </div>
+            </div>
+            <p className="text-xs font-medium text-slate-500 mb-1">Funds held</p>
+            <p className="text-2xl font-bold text-[#ee7b22] tabular-nums">
+              {book.heldShare.toFixed(1)}%
+            </p>
+          </div>
+
+          <div className="group bg-white rounded-xl border border-slate-200 p-5 transition-all duration-200 hover:shadow-lg hover:shadow-slate-200/60 hover:-translate-y-0.5 hover:border-slate-300">
+            <div className="flex items-center justify-between mb-3">
+              <div className="w-10 h-10 rounded-lg bg-slate-100 flex items-center justify-center transition-colors group-hover:bg-slate-200">
+                <Coins className="w-5 h-5 text-slate-500" />
+              </div>
+            </div>
+            <p className="text-xs font-medium text-slate-500 mb-1">Empty wallets</p>
+            <p className="text-2xl font-bold text-slate-600 tabular-nums">{book.empty}</p>
+          </div>
         </div>
       )}
 
@@ -1379,6 +1670,58 @@ export function WalletsPage() {
                 )}
               </div>
 
+              {/* Money movement — none of this existed before: a wallet's
+                  balance could never change from the UI at all. */}
+              {detailWallet.status === 'active' && (
+                <div className="border-t border-slate-200 pt-4">
+                  <p className="text-xs font-medium text-slate-500 mb-2">Move Money</p>
+                  <div className="grid grid-cols-3 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => openMoneyOp('deposit', detailWallet)}
+                      className="inline-flex flex-col items-center gap-1 px-2 py-2.5 bg-[#1ebcb2]/10 hover:bg-[#1ebcb2]/20 text-[#1ebcb2] text-xs font-semibold rounded-lg transition-colors"
+                    >
+                      <ArrowDownRight className="w-4 h-4" />
+                      Deposit
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => openMoneyOp('withdraw', detailWallet)}
+                      disabled={Number(detailWallet.available_balance || 0) <= 0}
+                      className="inline-flex flex-col items-center gap-1 px-2 py-2.5 bg-[#ee7b22]/10 hover:bg-[#ee7b22]/20 text-[#ee7b22] text-xs font-semibold rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                      title={
+                        Number(detailWallet.available_balance || 0) <= 0
+                          ? 'No available funds'
+                          : 'Pay out to the customer'
+                      }
+                    >
+                      <ArrowUpRight className="w-4 h-4" />
+                      Withdraw
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => openMoneyOp('transfer', detailWallet)}
+                      disabled={Number(detailWallet.available_balance || 0) <= 0}
+                      className="inline-flex flex-col items-center gap-1 px-2 py-2.5 bg-[#641f60]/10 hover:bg-[#641f60]/20 text-[#641f60] text-xs font-semibold rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                      title={
+                        Number(detailWallet.available_balance || 0) <= 0
+                          ? 'No available funds'
+                          : 'Send to another wallet'
+                      }
+                    >
+                      <ArrowRightLeft className="w-4 h-4" />
+                      Transfer
+                    </button>
+                  </div>
+                  {Number(detailWallet.held_balance || 0) > 0 && (
+                    <p className="text-[11px] text-slate-400 mt-2">
+                      {format(Number(detailWallet.held_balance), detailWallet.currency)} is held
+                      against pending activity and cannot be withdrawn.
+                    </p>
+                  )}
+                </div>
+              )}
+
               {/* Account status actions — the status column existed and was
                   displayed, but nothing could actually change it before. */}
               <div className="border-t border-slate-200 pt-4">
@@ -1458,19 +1801,39 @@ export function WalletsPage() {
                       const Icon = ledgerTxIcon(t.transaction_type);
                       const iconClasses = ledgerTxIconClasses(t.transaction_type);
                       const outflow = isOutflowForWallet(t, detailWallet.id);
+                      const tillLabel = t.float_account_id
+                        ? ledgerFloatLabels[t.float_account_id]
+                        : undefined;
                       return (
-                        <div key={t.id} className="px-3 py-2.5 flex items-center gap-2.5">
-                          <div className={`w-8 h-8 rounded-lg ${iconClasses.bg} flex items-center justify-center flex-shrink-0`}>
+                        <div
+                          key={t.id}
+                          className="group px-3 py-3 flex items-start gap-2.5 transition-colors duration-150 hover:bg-slate-50"
+                        >
+                          <div
+                            className={`w-8 h-8 rounded-lg ${iconClasses.bg} flex items-center justify-center flex-shrink-0 transition-transform duration-200 group-hover:scale-105`}
+                          >
                             <Icon className={`w-4 h-4 ${iconClasses.color}`} />
                           </div>
                           <div className="flex-1 min-w-0">
                             <p className="text-sm font-medium text-slate-800 capitalize truncate">
                               {t.transaction_type.replace(/_/g, ' ')}
                             </p>
-                            <p className="text-xs text-slate-500 truncate">{t.reference}</p>
+                            {/* Only rendered when the movement passed through a
+                                till. A wallet-to-wallet transfer never touches a
+                                drawer, and an empty line there would read as
+                                missing data rather than as correctly absent. */}
+                            {tillLabel && (
+                              <p className="text-[11px] text-slate-400 truncate mt-0.5 flex items-center gap-1 capitalize">
+                                <Banknote className="w-3 h-3 flex-shrink-0" />
+                                {tillLabel}
+                              </p>
+                            )}
+                            <p className="text-xs text-slate-500 truncate mt-0.5 font-mono">
+                              {t.reference}
+                            </p>
                           </div>
                           <div className="text-right flex-shrink-0">
-                            <p className={`text-sm font-semibold whitespace-nowrap ${outflow ? 'text-[#c46040]' : 'text-[#1ebcb2]'}`}>
+                            <p className={`text-sm font-semibold whitespace-nowrap tabular-nums ${outflow ? 'text-[#c46040]' : 'text-[#1ebcb2]'}`}>
                               {outflow ? '\u2212' : '+'}
                               {t.currency} {Number(t.amount).toLocaleString(undefined, { minimumFractionDigits: 2 })}
                             </p>
@@ -1550,6 +1913,202 @@ export function WalletsPage() {
                 </p>
               )}
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Deposit / Withdraw / Transfer */}
+      {moneyOp && moneyWallet && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full max-h-[90vh] overflow-y-auto">
+            <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between sticky top-0 bg-white">
+              <h2 className="text-lg font-bold text-[#641f60] flex items-center gap-2">
+                {moneyOp === 'deposit' && <ArrowDownRight className="w-5 h-5 text-[#1ebcb2]" />}
+                {moneyOp === 'withdraw' && <ArrowUpRight className="w-5 h-5 text-[#ee7b22]" />}
+                {moneyOp === 'transfer' && <ArrowRightLeft className="w-5 h-5" />}
+                {moneyOp === 'deposit'
+                  ? 'Deposit'
+                  : moneyOp === 'withdraw'
+                  ? 'Withdraw'
+                  : 'Transfer'}
+              </h2>
+              <button
+                type="button"
+                onClick={closeMoneyOp}
+                className="p-2 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100"
+                aria-label="Close"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleMoneySubmit} className="p-6 space-y-4">
+              <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg">
+                <p className="text-sm font-medium text-slate-900">
+                  {customerName(moneyWallet.customer)}
+                </p>
+                <p className="text-xs text-slate-500">{moneyWallet.account_number || '—'}</p>
+                <div className="flex items-center justify-between mt-2 pt-2 border-t border-slate-200">
+                  <span className="text-xs text-slate-500">Available</span>
+                  <span className="text-base font-bold text-slate-900">
+                    {format(Number(moneyWallet.available_balance || 0), moneyWallet.currency)}
+                  </span>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">Amount *</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  required
+                  value={moneyAmount}
+                  onChange={(e) => setMoneyAmount(e.target.value)}
+                  className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#1ebcb2]"
+                />
+              </div>
+
+              {moneyOp === 'transfer' ? (
+                <>
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">
+                      Destination wallet *
+                    </label>
+                    {transferTargetWallets.length > 0 ? (
+                      <select
+                        required
+                        value={moneyToWalletId}
+                        onChange={(e) => setMoneyToWalletId(e.target.value)}
+                        className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#1ebcb2]"
+                      >
+                        <option value="">Choose a wallet</option>
+                        {transferTargetWallets.map((w) => (
+                          <option key={w.id} value={w.id}>
+                            {customerName(w.customer)} — {w.account_number || w.wallet_type}
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      <p className="text-sm text-slate-500 px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-lg">
+                        No other active {moneyWallet.currency} wallet to transfer into. Moving
+                        between currencies is a forex deal, not a transfer.
+                      </p>
+                    )}
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">Fee</label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      value={moneyFee}
+                      onChange={(e) => setMoneyFee(e.target.value)}
+                      className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#1ebcb2]"
+                    />
+                    <p className="text-xs text-slate-400 mt-1">
+                      Deducted from the sender in addition to the amount.
+                    </p>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">
+                      Till {moneyOp === 'deposit' ? 'receiving' : 'paying'} the cash
+                    </label>
+                    <select
+                      value={moneyFloatId}
+                      onChange={(e) => setMoneyFloatId(e.target.value)}
+                      className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#1ebcb2]"
+                    >
+                      <option value="">Not tied to a till</option>
+                      {eligibleFloats.map((f) => (
+                        <option key={f.id} value={f.id}>
+                          {f.float_type.replace(/_/g, ' ')} — {f.currency}{' '}
+                          {Number(f.balance || 0).toLocaleString()}
+                        </option>
+                      ))}
+                    </select>
+                    <p className="text-xs text-slate-400 mt-1">
+                      {moneyOp === 'deposit'
+                        ? 'Choosing a till raises the drawer in the same transaction, so cash on hand matches the books.'
+                        : 'Choosing a till takes the cash out of that drawer. The payout is refused if it does not hold enough.'}
+                    </p>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">
+                      Payment method
+                    </label>
+                    <select
+                      value={moneySource}
+                      onChange={(e) => setMoneySource(e.target.value)}
+                      className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#1ebcb2]"
+                    >
+                      <option value="cash">Cash</option>
+                      <option value="mpesa">M-Pesa</option>
+                      <option value="momo">Mobile Money</option>
+                      <option value="bank">Bank</option>
+                    </select>
+                  </div>
+                </>
+              )}
+
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">Notes</label>
+                <textarea
+                  rows={2}
+                  value={moneyNotes}
+                  onChange={(e) => setMoneyNotes(e.target.value)}
+                  className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#1ebcb2]"
+                />
+              </div>
+
+              {moneyError && (
+                <div className="p-3 bg-[#c46040]/10 border border-[#c46040]/30 rounded-lg text-[#c46040] text-sm flex items-start gap-2">
+                  <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+                  {moneyError}
+                </div>
+              )}
+
+              <div className="flex items-center justify-end gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={closeMoneyOp}
+                  className="px-4 py-2.5 border border-slate-300 text-slate-700 font-medium rounded-lg hover:bg-slate-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={
+                    moneySubmitting ||
+                    (moneyOp === 'transfer' && transferTargetWallets.length === 0)
+                  }
+                  className={`px-6 py-2.5 text-white font-medium rounded-lg shadow-lg disabled:opacity-50 flex items-center gap-2 ${
+                    moneyOp === 'deposit'
+                      ? 'bg-[#1ebcb2] hover:bg-[#159089]'
+                      : moneyOp === 'withdraw'
+                      ? 'bg-[#ee7b22] hover:bg-[#c46040]'
+                      : 'bg-[#641f60] hover:bg-[#4a1646]'
+                  }`}
+                >
+                  {moneySubmitting ? (
+                    <>
+                      <Loader2 className="w-5 h-5 animate-spin" />
+                      Processing...
+                    </>
+                  ) : (
+                    <>
+                      {moneyOp === 'deposit' && <ArrowDownRight className="w-5 h-5" />}
+                      {moneyOp === 'withdraw' && <ArrowUpRight className="w-5 h-5" />}
+                      {moneyOp === 'transfer' && <ArrowRightLeft className="w-5 h-5" />}
+                      Confirm
+                    </>
+                  )}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

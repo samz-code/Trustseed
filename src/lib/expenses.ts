@@ -49,8 +49,26 @@ export interface ExpenseRow {
   notes: string | null;
   created_at: string;
   updated_at: string;
+
+  // Added by expense_float_link.sql. Null until the expense is actually paid:
+  // an approved-but-unpaid expense has not cost the branch anything yet.
+  float_account_id?: string | null;
+  paid_at?: string | null;
+  paid_by?: string | null;
+  /** The float movement created when this was paid, for reconciliation. */
+  transaction_id?: string | null;
+
   categoryName?: string;
   branchName?: string;
+}
+
+/** A till an expense can be paid from. */
+export interface PayableFloatAccount {
+  id: string;
+  float_type: string;
+  currency: string;
+  balance: number;
+  branch_id: string | null;
 }
 
 export interface CreateExpenseInput {
@@ -297,11 +315,69 @@ export async function rejectExpense(id: string, reason: string): Promise<void> {
   if (error) throw error;
 }
 
-export async function markExpensePaid(id: string): Promise<void> {
-  const { error } = await (supabase.from('expenses') as any)
-    .update({ status: 'paid' })
-    .eq('id', id);
+/**
+ * Tills that can settle an expense: active accounts in the same currency,
+ * with enough in them to cover the amount.
+ *
+ * Filtering by balance here means the operator is not offered a till that
+ * would then be refused by the database. The refusal still exists server-side
+ * — this only avoids presenting a choice that cannot work.
+ */
+export async function fetchPayableFloatAccounts(
+  tenantId: string,
+  currency: string,
+  minimumBalance = 0
+): Promise<PayableFloatAccount[]> {
+  const { data, error } = await (supabase.from('float_accounts') as any)
+    .select('id, float_type, currency, balance, branch_id')
+    .eq('tenant_id', tenantId)
+    .eq('currency', currency)
+    .eq('status', 'active')
+    .gte('balance', minimumBalance)
+    .order('balance', { ascending: false });
   if (error) throw error;
+  return (data ?? []) as PayableFloatAccount[];
+}
+
+export interface ExpensePaymentResult {
+  transactionId: string;
+  newFloatBalance: number;
+}
+
+/**
+ * Pays an expense from a specific till.
+ *
+ * This previously only flipped `status` to 'paid', leaving the float
+ * untouched: the books said the money was spent while the drawer still
+ * showed it. Now it calls expense_mark_paid(), which debits the till, writes
+ * the ledger entry and marks the expense paid inside ONE database
+ * transaction. Either all three happen or none do — there is no state where
+ * cash has left but the expense still reads unpaid, or vice versa.
+ *
+ * The database also enforces what the UI cannot be trusted to: the expense
+ * must be approved first, the currencies must match, and the till must
+ * actually hold enough. Those come back as errors and should be shown to the
+ * operator verbatim, since they say exactly what is wrong.
+ */
+export async function markExpensePaid(
+  id: string,
+  floatAccountId: string
+): Promise<ExpensePaymentResult> {
+  if (!floatAccountId) {
+    throw new Error('Choose which till this expense is being paid from.');
+  }
+
+  const { data, error } = await (supabase.rpc as any)('expense_mark_paid', {
+    p_expense_id: id,
+    p_float_account_id: floatAccountId,
+  });
+  if (error) throw error;
+
+  const row = Array.isArray(data) ? data[0] : data;
+  return {
+    transactionId: row?.transaction_id ?? '',
+    newFloatBalance: Number(row?.new_float_balance ?? 0),
+  };
 }
 
 export async function deleteExpense(id: string): Promise<void> {

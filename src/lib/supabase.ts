@@ -346,6 +346,9 @@ export type Database = {
           receiver_name: string | null;
           receiver_phone: string | null;
           destination_country: string | null;
+          sender_address: string | null;
+          sender_id_number: string | null;
+          receiver_city: string | null;
           purpose: string | null;
           notes: string | null;
           status: TransactionStatus;
@@ -383,6 +386,9 @@ export type Database = {
           receiver_name?: string | null;
           receiver_phone?: string | null;
           destination_country?: string | null;
+          sender_address?: string | null;
+          sender_id_number?: string | null;
+          receiver_city?: string | null;
           purpose?: string | null;
           notes?: string | null;
           status?: TransactionStatus;
@@ -394,6 +400,9 @@ export type Database = {
         };
         Update: {
           status?: TransactionStatus;
+          sender_address?: string | null;
+          sender_id_number?: string | null;
+          receiver_city?: string | null;
           compliance_status?: 'pending' | 'passed' | 'flagged' | 'blocked' | null;
           compliance_checked_at?: string | null;
           compliance_checked_by?: string | null;
@@ -921,6 +930,9 @@ export type Database = {
           is_active: boolean;
           effective_from: string;
           created_by: string | null;
+          spread_percent: number;
+          auto_update: boolean;
+          last_auto_update: string | null;
           created_at: string;
           updated_at: string;
         };
@@ -935,6 +947,8 @@ export type Database = {
           reference_rate?: number | null;
           is_active?: boolean;
           effective_from?: string;
+          spread_percent?: number;
+          auto_update?: boolean;
           created_by?: string | null;
         };
         Update: {
@@ -945,6 +959,89 @@ export type Database = {
           reference_rate?: number | null;
           is_active?: boolean;
           effective_from?: string;
+          spread_percent?: number;
+          auto_update?: boolean;
+          last_auto_update?: string | null;
+        };
+        Relationships: [];
+      };
+      platform_admins: {
+        Row: {
+          id: string;
+          user_id: string;
+          email: string;
+          full_name: string;
+          role: 'platform_owner' | 'platform_admin' | 'platform_support';
+          status: 'active' | 'inactive';
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          user_id: string;
+          email: string;
+          full_name: string;
+          role?: 'platform_owner' | 'platform_admin' | 'platform_support';
+          status?: 'active' | 'inactive';
+        };
+        Update: {
+          email?: string;
+          full_name?: string;
+          role?: 'platform_owner' | 'platform_admin' | 'platform_support';
+          status?: 'active' | 'inactive';
+        };
+        Relationships: [];
+      };
+      platform_invoices: {
+        Row: {
+          id: string;
+          invoice_number: string;
+          tenant_id: string;
+          subscription_id: string | null;
+          period_start: string;
+          period_end: string;
+          amount_usd: number;
+          plan: string;
+          billing_cycle: string;
+          status: 'open' | 'paid' | 'overdue' | 'void';
+          issued_at: string;
+          due_at: string;
+          paid_at: string | null;
+          payment_method: 'mpesa' | 'momo' | 'paypal' | 'bank' | 'card' | 'manual' | null;
+          amount_paid_usd: number | null;
+          amount_paid_local: number | null;
+          local_currency: string | null;
+          fx_rate: number | null;
+          provider_reference: string | null;
+          notes: string | null;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          invoice_number: string;
+          tenant_id: string;
+          subscription_id?: string | null;
+          period_start: string;
+          period_end: string;
+          amount_usd: number;
+          plan: string;
+          billing_cycle?: string;
+          status?: 'open' | 'paid' | 'overdue' | 'void';
+          due_at: string;
+          notes?: string | null;
+        };
+        Update: {
+          status?: 'open' | 'paid' | 'overdue' | 'void';
+          paid_at?: string | null;
+          payment_method?: 'mpesa' | 'momo' | 'paypal' | 'bank' | 'card' | 'manual' | null;
+          amount_paid_usd?: number | null;
+          amount_paid_local?: number | null;
+          local_currency?: string | null;
+          fx_rate?: number | null;
+          provider_reference?: string | null;
+          notes?: string | null;
+          due_at?: string;
         };
         Relationships: [];
       };

@@ -21,6 +21,8 @@ import {
   CheckCircle2,
   ShieldAlert,
   ChevronDown,
+  Phone,
+  MapPin,
 } from 'lucide-react';
 
 interface IntegrationField {
@@ -374,8 +376,36 @@ const EMPTY_BRANCH_FORM: BranchForm = {
   operating_currency: 'KES',
 };
 
+// ---------------------------------------------------------------------------
+// Settings are a single JSONB column, so every save has to merge rather than
+// rebuild. Three separate handlers here each reconstructed the whole object,
+// and two of them wrote empty strings over fields they were not editing:
+// saving an integration blanked the institution's branding, currency and
+// timezone. That is why colours appeared not to stick - they were being
+// saved correctly and then wiped by the next unrelated save.
+//
+// This merges the given patch over what is already stored, preserving
+// anything not explicitly changed, and merges `branding` one level deeper so
+// updating a logo does not drop the colours.
+// ---------------------------------------------------------------------------
+function mergeSettings(
+  existing: Record<string, unknown> | null | undefined,
+  patch: Record<string, unknown>
+): Record<string, unknown> {
+  const base = existing ?? {};
+  const merged: Record<string, unknown> = { ...base, ...patch };
+
+  if (patch.branding || base.branding) {
+    merged.branding = {
+      ...((base.branding as Record<string, unknown>) ?? {}),
+      ...((patch.branding as Record<string, unknown>) ?? {}),
+    };
+  }
+  return merged;
+}
+
 export function SettingsPage({ tab = 'general' }: SettingsPageProps) {
-  const { tenant, branches, branch, refreshTenant } = useAuth();
+  const { tenant, branches, branch, admin, refreshTenant } = useAuth();
   const [activeTab, setActiveTab] = useState(tab);
   const [saving, setSaving] = useState(false);
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
@@ -388,6 +418,11 @@ export function SettingsPage({ tab = 'general' }: SettingsPageProps) {
     default_currency: 'KES',
     timezone: 'Africa/Nairobi',
     website: '',
+    // Printed in the header of remittance vouchers and receipts. Without
+    // these the voucher header renders blank, which every voucher generated
+    // so far has done.
+    address: '',
+    phone: '',
   });
   const [logoUrl, setLogoUrl] = useState<string | null>(null);
   const [logoUploading, setLogoUploading] = useState(false);
@@ -396,6 +431,27 @@ export function SettingsPage({ tab = 'general' }: SettingsPageProps) {
   const [integrationSettings, setIntegrationSettings] = useState<Record<string, Record<string, string>>>({});
   const [activeIntegration, setActiveIntegration] = useState<IntegrationDef | null>(null);
   const [integrationForm, setIntegrationForm] = useState<Record<string, string>>({});
+
+  // Add User. The button existed but had no onClick at all, so it did
+  // nothing when pressed.
+  const [showUserForm, setShowUserForm] = useState(false);
+  const [userForm, setUserForm] = useState({
+    email: '',
+    full_name: '',
+    role: 'teller',
+    phone: '',
+    // 'invite' emails a set-password link, so nobody learns anyone else's
+    // password. 'password' lets an admin set a temporary one for staff
+    // without reliable email, which a rural branch genuinely needs.
+    mode: 'invite' as 'invite' | 'password',
+    password: '',
+  });
+  // Shown once after creating an account this way. It is deliberately not
+  // stored anywhere: the admin hands it over and it dies at first sign-in.
+  const [tempPasswordNotice, setTempPasswordNotice] = useState<string | null>(null);
+  const [userSaving, setUserSaving] = useState(false);
+  const [userError, setUserError] = useState<string | null>(null);
+  const [editingUser, setEditingUser] = useState<TenantAdmin | null>(null);
   const [integrationSaving, setIntegrationSaving] = useState(false);
   const [integrationError, setIntegrationError] = useState<string | null>(null);
 
@@ -412,6 +468,8 @@ export function SettingsPage({ tab = 'general' }: SettingsPageProps) {
         default_currency?: string;
         timezone?: string;
         website?: string;
+        address?: string;
+        phone?: string;
         integrations?: Record<string, Record<string, string>>;
       } | null;
 
@@ -423,6 +481,8 @@ export function SettingsPage({ tab = 'general' }: SettingsPageProps) {
         default_currency: settings?.default_currency || 'KES',
         timezone: settings?.timezone || 'Africa/Nairobi',
         website: settings?.website || '',
+        address: settings?.address || '',
+        phone: settings?.phone || '',
       });
       setLogoUrl(settings?.branding?.logo_url || null);
       setIntegrationSettings(settings?.integrations || {});
@@ -470,8 +530,9 @@ export function SettingsPage({ tab = 'general' }: SettingsPageProps) {
         .from('tenants')
         .update({
           name: formData.institution_name,
-          settings: {
-            ...existing,
+          // Merge, so notification settings, compliance thresholds and
+          // integration credentials survive a branding change.
+          settings: mergeSettings(existing, {
             branding: {
               primary_color: formData.primary_color,
               secondary_color: formData.secondary_color,
@@ -482,18 +543,9 @@ export function SettingsPage({ tab = 'general' }: SettingsPageProps) {
             enabled_currencies: enabledCurrencies,
             timezone: formData.timezone,
             website: formData.website.trim() || null,
-            language: '',
-            notification_settings: {
-              sms_enabled: false,
-              email_enabled: false,
-              push_enabled: false
-            },
-            compliance: {
-              large_transaction_threshold: 0,
-              kyc_required: false,
-              aml_screening_enabled: false
-            }
-          },
+            address: formData.address.trim() || null,
+            phone: formData.phone.trim() || null,
+          }),
         })
         .eq('id', tenant.id);
       if (error) throw error;
@@ -551,30 +603,11 @@ export function SettingsPage({ tab = 'general' }: SettingsPageProps) {
       await supabase
         .from('tenants')
         .update({
-          settings: {
-            ...existing,
-            branding: {
-              ...existingBranding,
-              primary_color: formData.primary_color,
-              secondary_color: formData.secondary_color,
-              accent_color: formData.accent_color,
-              logo_url: newLogoUrl,
-            },
-            default_currency: '',
-            enabled_currencies: [],
-            timezone: '',
-            language: '',
-            notification_settings: {
-              sms_enabled: false,
-              email_enabled: false,
-              push_enabled: false
-            },
-            compliance: {
-              large_transaction_threshold: 0,
-              kyc_required: false,
-              aml_screening_enabled: false
-            }
-          },
+          // Only the logo changes here. Merging keeps the colours, currency
+          // and every other setting intact.
+          settings: mergeSettings(existing, {
+            branding: { ...existingBranding, logo_url: newLogoUrl },
+          }),
         })
         .eq('id', tenant.id);
 
@@ -599,6 +632,146 @@ export function SettingsPage({ tab = 'general' }: SettingsPageProps) {
     setActiveIntegration(null);
     setIntegrationForm({});
     setIntegrationError(null);
+  };
+
+  const openUserForm = (user?: TenantAdmin) => {
+    if (user) {
+      setEditingUser(user);
+      setUserForm({
+        email: user.email,
+        full_name: user.full_name,
+        role: user.role,
+        phone: user.phone ?? '',
+        mode: 'invite',
+        password: '',
+      });
+    } else {
+      setEditingUser(null);
+      setUserForm({ email: '', full_name: '', role: 'teller', phone: '', mode: 'invite', password: '' });
+    }
+    setUserError(null);
+    setTempPasswordNotice(null);
+    setShowUserForm(true);
+  };
+
+  const closeUserForm = () => {
+    setShowUserForm(false);
+    setEditingUser(null);
+    setUserForm({ email: '', full_name: '', role: 'teller', phone: '', mode: 'invite', password: '' });
+    setUserError(null);
+  };
+
+  const handleSaveUser = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setUserError(null);
+
+    if (!tenant) {
+      setUserError('No institution context. Please sign in again.');
+      return;
+    }
+    const email = userForm.email.trim().toLowerCase();
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      setUserError('Enter a valid email address.');
+      return;
+    }
+    if (!userForm.full_name.trim()) {
+      setUserError('Enter the person\u2019s full name.');
+      return;
+    }
+
+    setUserSaving(true);
+    try {
+      if (editingUser) {
+        // Email is not editable: it is the key the person signs in with, and
+        // changing it here would silently orphan their account.
+        const { error } = await supabase
+          .from('tenant_admins')
+          .update({
+            full_name: userForm.full_name.trim(),
+            role: userForm.role as TenantAdmin['role'],
+            phone: userForm.phone.trim() || null,
+          })
+          .eq('id', editingUser.id)
+          .eq('tenant_id', tenant.id);
+        if (error) throw error;
+      } else {
+        if (userForm.mode === 'password' && userForm.password.length < 8) {
+          setUserError('Temporary password must be at least 8 characters.');
+          setUserSaving(false);
+          return;
+        }
+
+        // Creating a login needs the service role key, which bypasses every
+        // row-level policy and so can never live in the browser. The Edge
+        // Function holds it and re-checks server-side that the caller really
+        // is an admin of this institution before creating anything.
+        const { data, error } = await supabase.functions.invoke('create-tenant-user', {
+          body: {
+            tenant_id: tenant.id,
+            email,
+            full_name: userForm.full_name.trim(),
+            role: userForm.role,
+            phone: userForm.phone.trim() || null,
+            branch_id: branch?.id ?? null,
+            mode: userForm.mode,
+            password: userForm.mode === 'password' ? userForm.password : undefined,
+          },
+        });
+
+        if (error) {
+          throw new Error(
+            `${error.message}. Has the "create-tenant-user" Edge Function been deployed?`
+          );
+        }
+        if (!data?.success) {
+          throw new Error(data?.message ?? 'Could not create the user.');
+        }
+
+        // Shown once so the admin can pass it on. Never stored: it is
+        // invalidated the moment the person signs in and sets their own.
+        if (data.temp_password) {
+          setTempPasswordNotice(
+            `Account created for ${email}. Temporary password: ${data.temp_password} — they will be asked to change it when they first sign in.`
+          );
+        } else {
+          setTempPasswordNotice(data.message ?? null);
+        }
+      }
+
+      await loadAdmins();
+      // Leave the dialog open when there is a password to read; closing it
+      // would lose the only copy.
+      if (!userForm.password) {
+        closeUserForm();
+      }
+    } catch (err) {
+      console.error('Error saving user:', err);
+      setUserError(err instanceof Error ? err.message : 'Failed to save user');
+    } finally {
+      setUserSaving(false);
+    }
+  };
+
+  const toggleUserStatus = async (user: TenantAdmin) => {
+    if (!tenant) return;
+    // Deactivating yourself would lock you out of the very page needed to
+    // undo it.
+    if (user.id === admin?.id) {
+      setUserError('You cannot deactivate your own account.');
+      return;
+    }
+    try {
+      const { error } = await supabase
+        .from('tenant_admins')
+        .update({ status: user.status === 'active' ? 'inactive' : 'active' })
+        .eq('id', user.id)
+        .eq('tenant_id', tenant.id);
+      if (error) throw error;
+      await loadAdmins();
+    } catch (err) {
+      console.error('Error updating user status:', err);
+      setUserError(err instanceof Error ? err.message : 'Failed to update user');
+    }
   };
 
   const handleSaveIntegration = async (e: React.FormEvent) => {
@@ -627,30 +800,10 @@ export function SettingsPage({ tab = 'general' }: SettingsPageProps) {
       const { error } = await supabase
         .from('tenants')
         .update({
-          settings: {
-            ...existing,
-            integrations: updatedIntegrations,
-            default_currency: '',
-            enabled_currencies: [],
-            branding: {
-              primary_color: '',
-              secondary_color: '',
-              accent_color: undefined,
-              logo_url: null
-            },
-            timezone: '',
-            language: '',
-            notification_settings: {
-              sms_enabled: false,
-              email_enabled: false,
-              push_enabled: false
-            },
-            compliance: {
-              large_transaction_threshold: 0,
-              kyc_required: false,
-              aml_screening_enabled: false
-            }
-          },
+          // This previously overwrote branding, currency and timezone with
+          // empty values, so configuring an integration silently reset the
+          // institution's colours. Only integrations change here.
+          settings: mergeSettings(existing, { integrations: updatedIntegrations }),
         })
         .eq('id', tenant.id);
       if (error) throw error;
@@ -829,7 +982,76 @@ export function SettingsPage({ tab = 'general' }: SettingsPageProps) {
                   />
                 </div>
               </div>
+
+              {/* Printed at the top of every remittance voucher and receipt.
+                  Until now there was nowhere to enter them, so that header
+                  rendered blank on every document the institution issued. */}
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">
+                  Phone
+                </label>
+                <div className="relative">
+                  <Phone className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                  <input
+                    type="tel"
+                    value={formData.phone}
+                    onChange={e => setFormData({ ...formData, phone: e.target.value })}
+                    placeholder="+254 700 000 000"
+                    className="w-full pl-9 pr-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#1ebcb2]"
+                  />
+                </div>
+              </div>
+
+              <div className="md:col-span-2">
+                <label className="block text-sm font-medium text-slate-700 mb-1">
+                  Physical Address
+                </label>
+                <div className="relative">
+                  <MapPin className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                  <input
+                    type="text"
+                    value={formData.address}
+                    onChange={e => setFormData({ ...formData, address: e.target.value })}
+                    placeholder="e.g. Kimathi Street, Nairobi, Kenya"
+                    className="w-full pl-9 pr-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#1ebcb2]"
+                  />
+                </div>
+                <p className="text-xs text-slate-400 mt-1">
+                  Appears in the header of remittance vouchers, receipts and invoices.
+                </p>
+              </div>
             </div>
+
+            {/* A live preview, so it is obvious what these two fields are for
+                and whether the result reads correctly before saving. */}
+            {(formData.address.trim() || formData.phone.trim()) && (
+              <div className="p-4 bg-slate-50 border border-slate-200 rounded-lg">
+                <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-400 mb-2">
+                  Document header preview
+                </p>
+                <div className="flex items-start gap-3">
+                  {logoUrl && (
+                    <img
+                      src={logoUrl}
+                      alt=""
+                      className="h-10 w-auto object-contain flex-shrink-0"
+                    />
+                  )}
+                  <div className="text-sm leading-snug">
+                    <p className="font-bold text-slate-900">
+                      {formData.institution_name || 'Your institution'}
+                    </p>
+                    {formData.address.trim() && (
+                      <p className="text-slate-600 text-xs">{formData.address}</p>
+                    )}
+                    {formData.phone.trim() && (
+                      <p className="text-slate-600 text-xs">T: {formData.phone}</p>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+
             <div className="flex items-center justify-end gap-3">
               {saveMessage && <span className="text-sm text-slate-500">{saveMessage}</span>}
               <button
@@ -848,11 +1070,20 @@ export function SettingsPage({ tab = 'general' }: SettingsPageProps) {
           <div className="p-6">
             <div className="flex items-center justify-between mb-6">
               <h2 className="text-lg font-semibold text-slate-900">User Management</h2>
-              <button className="px-4 py-2 bg-[#1ebcb2] text-white rounded-lg flex items-center gap-2">
+              <button
+                onClick={() => openUserForm()}
+                className="px-4 py-2 bg-[#1ebcb2] hover:bg-[#159089] text-white rounded-lg flex items-center gap-2 transition-colors"
+              >
                 <Plus className="w-4 h-4" />
                 Add User
               </button>
             </div>
+            {userError && !showUserForm && (
+              <div className="mb-4 p-3 bg-[#c46040]/10 border border-[#c46040]/30 rounded-lg text-[#c46040] text-sm flex items-center gap-2">
+                <ShieldAlert className="w-4 h-4 flex-shrink-0" />
+                {userError}
+              </div>
+            )}
             <div className="divide-y divide-[#dae1e1]">
               {admins.map(adminUser => (
                 <div key={adminUser.id} className="py-4 flex items-center justify-between">
@@ -865,13 +1096,44 @@ export function SettingsPage({ tab = 'general' }: SettingsPageProps) {
                       <p className="text-sm text-slate-500">{adminUser.email}</p>
                     </div>
                   </div>
-                  <div className="flex items-center gap-4">
-                    <span className="px-2.5 py-1 rounded-full text-xs font-medium bg-blue-100 text-blue-700">
-                      {adminUser.role.replace('_', ' ')}
+                  <div className="flex items-center gap-3">
+                    <span className="px-2.5 py-1 rounded-full text-xs font-medium bg-blue-100 text-blue-700 capitalize">
+                      {adminUser.role.replace(/_/g, ' ')}
                     </span>
-                    <button className="p-2 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100">
+                    {/* Pending means invited but not yet signed in: the row is
+                        linked to an auth account on their first login. */}
+                    <span
+                      className={`px-2.5 py-1 rounded-full text-xs font-medium capitalize ${
+                        adminUser.status === 'active'
+                          ? 'bg-[#1ebcb2]/10 text-[#1ebcb2]'
+                          : adminUser.status === 'pending'
+                          ? 'bg-[#ee7b22]/10 text-[#ee7b22]'
+                          : 'bg-slate-100 text-slate-500'
+                      }`}
+                    >
+                      {adminUser.status}
+                    </span>
+                    <button
+                      onClick={() => openUserForm(adminUser)}
+                      className="p-2 rounded-lg text-slate-400 hover:text-[#641f60] hover:bg-slate-100 transition-colors"
+                      aria-label="Edit user"
+                    >
                       <Edit className="w-4 h-4" />
                     </button>
+                    {adminUser.id !== admin?.id && (
+                      <button
+                        onClick={() => toggleUserStatus(adminUser)}
+                        className={`p-2 rounded-lg transition-colors ${
+                          adminUser.status === 'active'
+                            ? 'text-slate-400 hover:text-[#c46040] hover:bg-[#c46040]/10'
+                            : 'text-slate-400 hover:text-[#1ebcb2] hover:bg-[#1ebcb2]/10'
+                        }`}
+                        aria-label={adminUser.status === 'active' ? 'Deactivate' : 'Activate'}
+                        title={adminUser.status === 'active' ? 'Deactivate' : 'Activate'}
+                      >
+                        <Shield className="w-4 h-4" />
+                      </button>
+                    )}
                   </div>
                 </div>
               ))}
@@ -1346,6 +1608,228 @@ export function SettingsPage({ tab = 'general' }: SettingsPageProps) {
                 )}
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Add / edit user */}
+      {showUserForm && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full max-h-[90vh] overflow-y-auto">
+            <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between sticky top-0 bg-white">
+              <h2 className="text-xl font-bold text-[#641f60]">
+                {editingUser ? 'Edit User' : 'Add User'}
+              </h2>
+              <button
+                type="button"
+                onClick={closeUserForm}
+                className="p-2 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100"
+                aria-label="Close"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveUser} className="p-6 space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">Email *</label>
+                <input
+                  type="email"
+                  required
+                  disabled={!!editingUser}
+                  value={userForm.email}
+                  onChange={(e) => setUserForm((p) => ({ ...p, email: e.target.value }))}
+                  placeholder="person@institution.co.ke"
+                  className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#1ebcb2] disabled:bg-slate-50 disabled:text-slate-500"
+                />
+                <p className="text-xs text-slate-400 mt-1">
+                  {editingUser
+                    ? 'Email is fixed: it is how this person signs in.'
+                    : 'They can be invited before registering. Their account links to this row the first time they sign in with this email.'}
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">Full Name *</label>
+                <input
+                  type="text"
+                  required
+                  value={userForm.full_name}
+                  onChange={(e) => setUserForm((p) => ({ ...p, full_name: e.target.value }))}
+                  className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#1ebcb2]"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">Phone</label>
+                <input
+                  type="tel"
+                  value={userForm.phone}
+                  onChange={(e) => setUserForm((p) => ({ ...p, phone: e.target.value }))}
+                  className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#1ebcb2]"
+                />
+              </div>
+
+              {/* How the account gets its password. Only relevant when
+                  creating: an existing member's password is never touched
+                  from here. */}
+              {!editingUser && (
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1.5">
+                    How should they sign in?
+                  </label>
+                  <div className="space-y-2">
+                    <button
+                      type="button"
+                      onClick={() => setUserForm((p) => ({ ...p, mode: 'invite' }))}
+                      className={`w-full flex items-start gap-2.5 p-3 rounded-lg border-2 text-left transition-all ${
+                        userForm.mode === 'invite'
+                          ? 'border-[#1ebcb2] bg-[#1ebcb2]/[0.07]'
+                          : 'border-slate-200 hover:border-slate-300'
+                      }`}
+                    >
+                      <CheckCircle2
+                        className={`w-4 h-4 mt-0.5 flex-shrink-0 ${
+                          userForm.mode === 'invite' ? 'text-[#1ebcb2]' : 'text-slate-300'
+                        }`}
+                      />
+                      <span>
+                        <span className="block text-sm font-semibold text-slate-900">
+                          Email them an invite
+                        </span>
+                        <span className="block text-xs text-slate-500 mt-0.5">
+                          They set their own password from a link. Nobody else ever knows it.
+                        </span>
+                      </span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setUserForm((p) => ({ ...p, mode: 'password' }))}
+                      className={`w-full flex items-start gap-2.5 p-3 rounded-lg border-2 text-left transition-all ${
+                        userForm.mode === 'password'
+                          ? 'border-[#ee7b22] bg-[#ee7b22]/[0.07]'
+                          : 'border-slate-200 hover:border-slate-300'
+                      }`}
+                    >
+                      <Shield
+                        className={`w-4 h-4 mt-0.5 flex-shrink-0 ${
+                          userForm.mode === 'password' ? 'text-[#ee7b22]' : 'text-slate-300'
+                        }`}
+                      />
+                      <span>
+                        <span className="block text-sm font-semibold text-slate-900">
+                          Set a temporary password
+                        </span>
+                        <span className="block text-xs text-slate-500 mt-0.5">
+                          For staff without email. They must change it when they first sign in.
+                        </span>
+                      </span>
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {!editingUser && userForm.mode === 'password' && (
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">
+                    Temporary password *
+                  </label>
+                  <input
+                    type="text"
+                    value={userForm.password}
+                    onChange={(e) => setUserForm((p) => ({ ...p, password: e.target.value }))}
+                    placeholder="At least 8 characters"
+                    className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#1ebcb2] font-mono"
+                  />
+                  <p className="text-xs text-slate-400 mt-1">
+                    Shown in plain text so you can read it out. It stops working once they set
+                    their own, which keeps their actions attributable to them alone.
+                  </p>
+                </div>
+              )}
+
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">Role *</label>
+                <select
+                  required
+                  value={userForm.role}
+                  onChange={(e) => setUserForm((p) => ({ ...p, role: e.target.value }))}
+                  className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#1ebcb2]"
+                >
+                  <optgroup label="Operations">
+                    <option value="teller">Teller</option>
+                    <option value="cashier">Cashier</option>
+                    <option value="customer_service">Customer Service</option>
+                    <option value="forex_officer">Forex Officer</option>
+                  </optgroup>
+                  <optgroup label="Lending">
+                    <option value="loan_officer">Loan Officer</option>
+                  </optgroup>
+                  <optgroup label="Finance">
+                    <option value="accountant">Accountant</option>
+                    <option value="finance_officer">Finance Officer</option>
+                  </optgroup>
+                  <optgroup label="Oversight">
+                    <option value="compliance_officer">Compliance Officer</option>
+                    <option value="auditor">Auditor</option>
+                    <option value="branch_manager">Branch Manager</option>
+                    <option value="head_office_admin">Head Office Admin</option>
+                    <option value="institution_admin">Institution Admin</option>
+                  </optgroup>
+                </select>
+                <p className="text-xs text-slate-400 mt-1">
+                  The role decides which pages they can reach and what they can do there.
+                </p>
+              </div>
+
+              {tempPasswordNotice && (
+                <div className="p-3 bg-[#1ebcb2]/10 border border-[#1ebcb2]/30 rounded-lg text-sm">
+                  <div className="flex items-start gap-2 text-slate-800">
+                    <CheckCircle2 className="w-4 h-4 flex-shrink-0 mt-0.5 text-[#1ebcb2]" />
+                    <span className="break-words">{tempPasswordNotice}</span>
+                  </div>
+                  <p className="text-xs text-slate-500 mt-2">
+                    Note it down now: it is not stored and cannot be shown again.
+                  </p>
+                </div>
+              )}
+
+              {userError && (
+                <div className="p-3 bg-[#c46040]/10 border border-[#c46040]/30 rounded-lg text-[#c46040] text-sm flex items-start gap-2">
+                  <ShieldAlert className="w-4 h-4 flex-shrink-0 mt-0.5" />
+                  {userError}
+                </div>
+              )}
+
+              <div className="flex items-center justify-end gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={closeUserForm}
+                  className="px-4 py-2.5 border border-slate-300 text-slate-700 font-medium rounded-lg hover:bg-slate-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={userSaving}
+                  className="px-6 py-2.5 bg-[#1ebcb2] hover:bg-[#159089] text-white font-medium rounded-lg shadow-lg disabled:opacity-50 flex items-center gap-2"
+                >
+                  {userSaving ? (
+                    <Loader2 className="w-5 h-5 animate-spin" />
+                  ) : editingUser ? (
+                    <Save className="w-5 h-5" />
+                  ) : (
+                    <Plus className="w-5 h-5" />
+                  )}
+                  {editingUser
+                    ? 'Save Changes'
+                    : userForm.mode === 'invite'
+                    ? 'Send Invite'
+                    : 'Create Account'}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

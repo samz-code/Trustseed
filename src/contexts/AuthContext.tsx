@@ -1,7 +1,7 @@
 import React, { createContext, useContext, useEffect, useState, useCallback } from 'react';
 import { supabase } from '../lib/supabase';
 import type { User, Session } from '@supabase/supabase-js';
-import type { Tenant, TenantAdmin, Branch } from '../types';
+import type { Tenant, TenantAdmin, Branch, PlatformAdmin } from '../types';
 import { applyBranding, resetBranding } from '../lib/branding';
 // [[RBAC]] permission loading
 import { fetchMyPermissions } from '../services/permission.service';
@@ -23,6 +23,11 @@ interface AuthContextType {
   needsPayment: boolean;
   pendingPlan: string | null;
   pendingInstitutionName: string | null;
+  // [[PLATFORM]] Trust Seed staff who administer ALL institutions. Set only
+  // when this login has an active platform_admins row. Platform staff have
+  // NO tenant context and are deliberately excluded from tenant RBAC.
+  platformAdmin: PlatformAdmin | null;
+  isPlatformAdmin: boolean;
   // [[RBAC]] flat permission set for the signed-in user ('*' => full access),
   // plus helpers. usePermissions() reads these.
   permissions: string[];
@@ -74,6 +79,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [needsPayment, setNeedsPayment] = useState(false);
   const [pendingPlan, setPendingPlan] = useState<string | null>(null);
   const [pendingInstitutionName, setPendingInstitutionName] = useState<string | null>(null);
+  // [[PLATFORM]] Trust Seed staff
+  const [platformAdmin, setPlatformAdmin] = useState<PlatformAdmin | null>(null);
   // [[RBAC]] permission state
   const [permissions, setPermissions] = useState<string[]>([]);
   const [permissionsLoading, setPermissionsLoading] = useState(false);
@@ -88,6 +95,46 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   // user_metadata to tell "awaiting payment" apart from "not an admin".
   const loadUserTenant = useCallback(async (authUser: User) => {
     try {
+      // [[PLATFORM]] STEP 1 — is this Trust Seed staff?
+      //
+      // Checked BEFORE tenant_admins, because platform staff belong to no
+      // single institution. Their cross-tenant read access comes from the
+      // is_platform_admin() RLS policies in the database, NOT from anything
+      // decided here; this lookup only tells the UI which console to show.
+      // A client can't fake it: even if this state were tampered with, RLS
+      // would still refuse the queries.
+      const { data: platformRow, error: platformError } = await supabase
+        .from('platform_admins')
+        .select('*')
+        .eq('user_id', authUser.id)
+        .eq('status', 'active')
+        .maybeSingle();
+
+      if (platformError) throw platformError;
+
+      if (platformRow) {
+        setPlatformAdmin(platformRow as PlatformAdmin);
+        // Platform staff have no tenant context at all.
+        setTenant(null);
+        setAdmin(null);
+        setBranch(null);
+        setBranches([]);
+        setNeedsPayment(false);
+        setPendingPlan(null);
+        setPendingInstitutionName(null);
+        // Tenant RBAC does not apply to platform staff; the platform console
+        // authorizes by PlatformRole instead. Leaving this empty avoids a
+        // pointless fetchMyPermissions() call that would return nothing.
+        setPermissions([]);
+        setPermissionsLoading(false);
+        applyTenantBranding(null);
+        setError(null);
+        return;
+      }
+
+      setPlatformAdmin(null);
+
+      // STEP 2 — normal tenant staff flow.
       const { data: adminData, error: adminError } = await supabase
         .from('tenant_admins')
         .select('*')
@@ -193,6 +240,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           setAdmin(null);
           setBranches([]);
           setBranch(null);
+          setPlatformAdmin(null); // [[PLATFORM]] clear on sign-out
           setPermissions([]); // [[RBAC]] clear on sign-out
           setNeedsPayment(false);
           setPendingPlan(null);
@@ -289,6 +337,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setAdmin(null);
     setBranches([]);
     setBranch(null);
+    setPlatformAdmin(null); // [[PLATFORM]] clear on sign-out
     setPermissions([]); // [[RBAC]] clear on sign-out
     setNeedsPayment(false);
     setPendingPlan(null);
@@ -351,6 +400,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   // [[RBAC]] Convenience checks. Wildcard roles (super_admin/institution_admin)
   // resolve to true even before the permission list arrives, matching the
   // server-side has_permission() short-circuit.
+  //
+  // NOTE: these are TENANT permissions. Platform staff always resolve to
+  // false here by design - the platform console gates on PlatformRole, and
+  // platform staff never render tenant pages.
   const isWildcard =
     permissions.includes(WILDCARD) ||
     (!!admin?.role && (FULL_ACCESS_ROLES as string[]).includes(admin.role));
@@ -374,6 +427,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     needsPayment,
     pendingPlan,
     pendingInstitutionName,
+    platformAdmin, // [[PLATFORM]]
+    isPlatformAdmin: !!platformAdmin, // [[PLATFORM]]
     permissions, // [[RBAC]]
     permissionsLoading, // [[RBAC]]
     hasPermission, // [[RBAC]]

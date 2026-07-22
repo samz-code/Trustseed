@@ -30,12 +30,13 @@ import { FloatPage } from './components/FloatPage';
 import { DailyOpeningPage } from './components/DailyOpeningPage';
 import { DailyClosingPage } from './components/DailyClosingPage';
 import { BranchTransfersPage } from './components/BranchTransfersPage';
-import { BranchPerformancePage } from './components/BranchPerformancePage.tsx';
+import { BranchPerformancePage } from './components/BranchPerformancePage';
 import { ChartOfAccountsPage } from './components/ChartOfAccountsPage';
 import { JournalEntriesPage } from './components/JournalEntriesPage';
 import { GeneralLedgerPage } from './components/GeneralLedgerPage';
 import { TrialBalancePage } from './components/TrialBalancePage';
 import { ReportsPage } from './components/ReportsPage';
+import { NotificationsPage } from './components/NotificationsPage';
 import { SettingsPage } from './components/SettingsPage';
 import { ForexPage } from './components/ForexPage';
 import { ApprovalsPage } from './components/ApprovalsPage';
@@ -44,19 +45,12 @@ import LoadingScreen from './components/LoadingScreen';
 import { AlertTriangle, RefreshCw, Home } from 'lucide-react';
 
 // ==========================================
-// SUPER ADMINISTRATIVE SECTION IMPORTS
+// PLATFORM OWNER CONSOLE (Trust Seed staff)
 // ==========================================
-import {
-  AdminOverview,
-  AdminInstitutions,
-  AdminBilling,
-  AdminTeamManagement,
-  AdminBroadcasts,
-  AdminAuditLogs
-} from './components/AdminPanelSections';
+import { PlatformPortal } from './components/platform/PlatformPortal';
 
 function AppContent() {
-  const { user, tenant, loading, error, needsPayment, signOut } = useAuth();
+  const { user, tenant, loading, error, needsPayment, isPlatformAdmin, signOut } = useAuth();
   const [currentPage, setCurrentPage] = React.useState('dashboard');
   const [signingOut, setSigningOut] = React.useState(false);
 
@@ -67,18 +61,6 @@ function AppContent() {
     window.addEventListener('navigate', handleNavigation as EventListener);
     return () => window.removeEventListener('navigate', handleNavigation as EventListener);
   }, []);
-
-  // Inspect context attributes to evaluate whether user belongs to core operation tier
-  const isPlatformSuperAdmin = React.useMemo(() => {
-    if (!user || !user.email) return false;
-
-    // Evaluate via identity token metadata flags or designated administrative routing domains
-    return (
-      user.user_metadata?.is_platform_admin === true ||
-      user.email.endsWith('@trustseed.net') ||
-      user.email.endsWith('@trustseed.network')
-    );
-  }, [user]);
 
   const handleBackToHome = async () => {
     setSigningOut(true);
@@ -99,7 +81,7 @@ function AppContent() {
     const isUnconfirmedEmail = /email not confirmed/i.test(error);
     const title = isUnconfirmedEmail ? 'Confirm your email' : 'Something went wrong';
     const description = isUnconfirmedEmail
-      ? 'Your email address hasn’t been confirmed yet. Check your inbox for a confirmation link, then try signing in again.'
+      ? 'Your email address hasn\u2019t been confirmed yet. Check your inbox for a confirmation link, then try signing in again.'
       : error;
 
     return (
@@ -179,49 +161,34 @@ function AppContent() {
     );
   }
 
-  // Skip tenant subscription checkpoints if the user has platform super-admin privileges
-  if (!isPlatformSuperAdmin) {
-    if (needsPayment) {
-      return <CheckoutPage />;
-    }
+  // ==========================================
+  // PLATFORM OWNER CONSOLE
+  // ==========================================
+  // isPlatformAdmin comes from an active platform_admins row, verified
+  // server-side. It is NOT derived from user_metadata or an email domain,
+  // both of which a client can set for itself. The console's cross-tenant
+  // data access is enforced by the is_platform_admin() RLS policies, so
+  // even a tampered client gets nothing back.
+  //
+  // Checked before every tenant gate below, since platform staff have no
+  // tenant, no subscription, and no onboarding state.
+  if (isPlatformAdmin) {
+    return <PlatformPortal />;
+  }
 
-    if (tenant && !tenant.onboarding_completed) {
-      return <OnboardingPage />;
-    }
+  // Signed up but hasn't completed payment yet - no tenant exists for them
+  // until provisioning runs, so this must come before any tenant-dependent
+  // rendering (including DashboardLayout).
+  if (needsPayment) {
+    return <CheckoutPage />;
+  }
+
+  if (tenant && !tenant.onboarding_completed) {
+    return <OnboardingPage />;
   }
 
   // ==========================================
-  // VIEW ROUTER: PLATFORM SUPER ADMINISTRATIVE VIEW
-  // ==========================================
-  if (isPlatformSuperAdmin) {
-    const renderAdminPage = () => {
-      switch (currentPage) {
-        case 'dashboard':
-          return <AdminOverview />;
-        case 'institutions':
-          return <AdminInstitutions />;
-        case 'billing':
-          return <AdminBilling />;
-        case 'team':
-          return <AdminTeamManagement />;
-        case 'notifications':
-          return <AdminBroadcasts />;
-        case 'audit':
-          return <AdminAuditLogs />;
-        default:
-          return <AdminOverview />;
-      }
-    };
-
-    return (
-      <DashboardLayout>
-        {renderAdminPage()}
-      </DashboardLayout>
-    );
-  }
-
-  // ==========================================
-  // VIEW ROUTER: TENANT SUBSCRIBER OPERATIONS
+  // TENANT SUBSCRIBER OPERATIONS
   // ==========================================
   const renderTenantPage = () => {
     switch (currentPage) {
@@ -273,6 +240,8 @@ function AppContent() {
         return <TrialBalancePage />;
       case 'reports':
         return <ReportsPage />;
+      case 'notifications':
+        return <NotificationsPage />;
       case 'users-roles':
         return <UsersRolesPage />;
       case 'settings':
@@ -282,11 +251,7 @@ function AppContent() {
     }
   };
 
-  return (
-    <DashboardLayout>
-      {renderTenantPage()}
-    </DashboardLayout>
-  );
+  return <DashboardLayout>{renderTenantPage()}</DashboardLayout>;
 }
 
 function App() {

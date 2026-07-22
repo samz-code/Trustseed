@@ -16,6 +16,11 @@ import {
   RefreshCw,
   Receipt,
   Landmark,
+  BookOpen,
+  ShieldAlert,
+  UserPlus,
+  Ban,
+  TrendingUp,
 } from 'lucide-react';
 
 type ChangeType = 'positive' | 'negative' | 'neutral';
@@ -73,6 +78,25 @@ interface DashboardData {
   floatAccountCount: number;
   recentTransactions: RecentTx[];
   pendingApprovals: PendingApproval[];
+
+  // --- Role-specific figures -------------------------------------------
+  // Loaded only for the role that needs them, so a teller's dashboard does
+  // not pay for an accountant's queries and vice versa.
+
+  /** Teller / cashier: this person's own activity, not the branch's. */
+  myTxCountToday: number;
+  myCashInToday: number;
+  myCashOutToday: number;
+
+  /** Accountant / finance: what still needs their attention. */
+  unpostedJournalCount: number;
+  expensesAwaitingPayment: number;
+  expensesAwaitingPaymentTotal: number;
+
+  /** Customer service: onboarding and account health. */
+  kycPendingCount: number;
+  frozenWalletCount: number;
+  newCustomersThisMonth: number;
 }
 
 const EMPTY: DashboardData = {
@@ -91,7 +115,36 @@ const EMPTY: DashboardData = {
   floatAccountCount: 0,
   recentTransactions: [],
   pendingApprovals: [],
+  myTxCountToday: 0,
+  myCashInToday: 0,
+  myCashOutToday: 0,
+  unpostedJournalCount: 0,
+  expensesAwaitingPayment: 0,
+  expensesAwaitingPaymentTotal: 0,
+  kycPendingCount: 0,
+  frozenWalletCount: 0,
+  newCustomersThisMonth: 0,
 };
+
+// Who can act on an approval queue. Anyone else would be shown a list they
+// have no page to clear it from.
+const APPROVAL_ROLES = new Set([
+  'super_admin',
+  'institution_admin',
+  'head_office_admin',
+  'branch_manager',
+  'compliance_officer',
+  'finance_officer',
+]);
+
+// Who compares branches. A teller works one till; the comparison is noise.
+const BRANCH_OVERVIEW_ROLES = new Set([
+  'super_admin',
+  'institution_admin',
+  'head_office_admin',
+  'branch_manager',
+  'auditor',
+]);
 
 const EMPTY_EXPENSES: ExpenseSummary = {
   totalToday: 0,
@@ -365,6 +418,120 @@ export function DashboardPage() {
         seesAllBranches ? null : branchId
       );
 
+      // --- Role-specific queries -------------------------------------
+      // Only the queries this role's dashboard actually shows are run. A
+      // teller never pays for the accountant's journal scan, and vice versa.
+      let myTxCountToday = 0;
+      let myCashInToday = 0;
+      let myCashOutToday = 0;
+      let unpostedJournalCount = 0;
+      let expensesAwaitingPayment = 0;
+      let expensesAwaitingPaymentTotal = 0;
+      let kycPendingCount = 0;
+      let frozenWalletCount = 0;
+      let newCustomersThisMonth = 0;
+
+      const role = admin?.role ?? '';
+
+      if ((role === 'teller' || role === 'cashier') && admin?.id) {
+        // A teller cares about their OWN till position today, not the
+        // branch total: it is what they will be asked to reconcile at close.
+        const myTxRes = await supabase
+          .from('transactions')
+          .select('transaction_type, amount, status')
+          .eq('tenant_id', tenant!.id)
+          .eq('created_by', admin.id)
+          .gte('created_at', todayIso);
+        if (myTxRes.error) throw myTxRes.error;
+
+        const myTx = (myTxRes.data ?? []) as {
+          transaction_type: string;
+          amount: number | null;
+          status: string;
+        }[];
+        // Cancelled and failed movements never touched the drawer, so they
+        // are excluded rather than inflating the day's figures.
+        const settled = myTx.filter(
+          (t) => t.status !== 'cancelled' && t.status !== 'failed' && t.status !== 'reversed'
+        );
+        myTxCountToday = settled.length;
+        for (const t of settled) {
+          const amt = Number(t.amount) || 0;
+          if (t.transaction_type === 'deposit' || t.transaction_type === 'float_allocation') {
+            myCashInToday += amt;
+          } else if (
+            t.transaction_type === 'withdrawal' ||
+            t.transaction_type === 'float_return'
+          ) {
+            myCashOutToday += amt;
+          }
+        }
+      }
+
+      if (role === 'accountant' || role === 'finance_officer') {
+        const [journalRes, unpaidExpRes] = await Promise.all([
+          supabase
+            .from('journal_entries')
+            .select('id', { count: 'exact', head: true })
+            .eq('tenant_id', tenant!.id)
+            .eq('status', 'draft'),
+          // Approved but not yet paid: money the institution owes and the
+          // accountant is expected to settle.
+          supabase
+            .from('expenses')
+            .select('amount')
+            .eq('tenant_id', tenant!.id)
+            .eq('status', 'approved'),
+        ]);
+        if (journalRes.error) throw journalRes.error;
+        if (unpaidExpRes.error) throw unpaidExpRes.error;
+
+        unpostedJournalCount = journalRes.count ?? 0;
+        const unpaid = (unpaidExpRes.data ?? []) as { amount: number | null }[];
+        expensesAwaitingPayment = unpaid.length;
+        expensesAwaitingPaymentTotal = unpaid.reduce((sum, e) => sum + (Number(e.amount) || 0), 0);
+      }
+
+      if (role === 'customer_service') {
+        const monthStart = new Date();
+        monthStart.setDate(1);
+        monthStart.setHours(0, 0, 0, 0);
+
+        let kycQuery = supabase
+          .from('customers')
+          .select('id', { count: 'exact', head: true })
+          .eq('tenant_id', tenant!.id)
+          .eq('kyc_status', 'pending');
+        kycQuery = scopeBranch(kycQuery);
+
+        let frozenQuery = supabase
+          .from('wallets')
+          .select('id', { count: 'exact', head: true })
+          .eq('tenant_id', tenant!.id)
+          .eq('status', 'frozen');
+        frozenQuery = scopeBranch(frozenQuery);
+
+        let newCustQuery = supabase
+          .from('customers')
+          .select('id', { count: 'exact', head: true })
+          .eq('tenant_id', tenant!.id)
+          .gte('created_at', monthStart.toISOString());
+        newCustQuery = scopeBranch(newCustQuery);
+
+        const [kycRes, frozenRes, newCustRes] = await Promise.all([
+          kycQuery,
+          frozenQuery,
+          newCustQuery,
+        ]);
+        if (kycRes.error) throw kycRes.error;
+        if (frozenRes.error) throw frozenRes.error;
+        if (newCustRes.error) throw newCustRes.error;
+
+        kycPendingCount = kycRes.count ?? 0;
+        frozenWalletCount = frozenRes.count ?? 0;
+        newCustomersThisMonth = newCustRes.count ?? 0;
+      }
+
       setData({
         customerCount: customersRes.count ?? 0,
         walletCount: wallets.length,
@@ -381,6 +548,15 @@ export function DashboardPage() {
         floatAccountCount,
         recentTransactions,
         pendingApprovals,
+        myTxCountToday,
+        myCashInToday,
+        myCashOutToday,
+        unpostedJournalCount,
+        expensesAwaitingPayment,
+        expensesAwaitingPaymentTotal,
+        kycPendingCount,
+        frozenWalletCount,
+        newCustomersThisMonth,
       });
       setExpenseSummary(expSummary);
     } catch (err) {
@@ -391,7 +567,10 @@ export function DashboardPage() {
     } finally {
       setLoading(false);
     }
-  }, [tenant, branchId, seesAllBranches, defaultCurrency]);
+  // admin is a dependency because the role-specific queries above branch on
+  // admin.role and admin.id: without it, switching user would keep showing
+  // the previous role's figures.
+  }, [tenant, admin, branchId, seesAllBranches, defaultCurrency]);
 
   useEffect(() => {
     loadDashboard();
@@ -408,7 +587,173 @@ export function DashboardPage() {
   // color. There are exactly 8 stat cards and 8 color keys defined in
   // `tileClasses` (5 base brand colors + 3 derived tints/shades), so every
   // key here is used exactly once.
-  const stats: StatCard[] = [
+  // ---------------------------------------------------------------------
+  // Role-specific dashboards.
+  //
+  // Filtering the same eight cards by role would hide boxes without telling
+  // anyone anything useful. A teller does not need the institution's total
+  // customer count; they need their own till position for the reconciliation
+  // they will be asked for at close. So the roles with real day-to-day work
+  // get cards built for that work, and everyone else gets the shared set
+  // trimmed to what their navigation already permits.
+  // ---------------------------------------------------------------------
+  const role = admin?.role ?? '';
+
+  const tellerStats: StatCard[] = [
+    {
+      label: 'My Transactions Today',
+      value: data.myTxCountToday.toLocaleString(),
+      change: 'processed by you',
+      changeType: 'neutral',
+      icon: <Activity className="w-6 h-6" />,
+      color: 'purple',
+    },
+    {
+      label: 'Cash In Today',
+      value: formatMoney(data.myCashInToday, defaultCurrency),
+      change: 'deposits and top-ups',
+      changeType: 'positive',
+      icon: <ArrowDownRight className="w-6 h-6" />,
+      color: 'teal',
+    },
+    {
+      label: 'Cash Out Today',
+      value: formatMoney(data.myCashOutToday, defaultCurrency),
+      change: 'withdrawals and payouts',
+      changeType: 'neutral',
+      icon: <ArrowUpRight className="w-6 h-6" />,
+      color: 'orange',
+    },
+    {
+      label: 'Net Position',
+      value: formatMoney(data.myCashInToday - data.myCashOutToday, defaultCurrency),
+      change: data.myCashInToday >= data.myCashOutToday ? 'net inflow' : 'net outflow',
+      changeType: data.myCashInToday >= data.myCashOutToday ? 'positive' : 'negative',
+      icon: <Wallet className="w-6 h-6" />,
+      color: 'mint',
+    },
+    {
+      label: 'Float Balance',
+      value: `${currencyFlag(data.floatCurrency)} ${formatMoney(data.floatTotal, data.floatCurrency)}`,
+      change: floatChange,
+      changeType: 'neutral',
+      icon: <Landmark className="w-6 h-6" />,
+      color: 'deepTeal',
+    },
+    {
+      label: 'Total Customers',
+      value: data.customerCount.toLocaleString(),
+      change: 'active',
+      changeType: 'neutral',
+      icon: <Users className="w-6 h-6" />,
+      color: 'plum',
+    },
+  ];
+
+  const accountantStats: StatCard[] = [
+    {
+      label: 'Unposted Journals',
+      value: data.unpostedJournalCount.toLocaleString(),
+      change: data.unpostedJournalCount > 0 ? 'awaiting posting' : 'all posted',
+      changeType: data.unpostedJournalCount > 0 ? 'negative' : 'positive',
+      icon: <BookOpen className="w-6 h-6" />,
+      color: 'purple',
+    },
+    {
+      label: 'Expenses to Pay',
+      value: data.expensesAwaitingPayment.toLocaleString(),
+      change: `${formatMoney(data.expensesAwaitingPaymentTotal, defaultCurrency)} approved`,
+      changeType: data.expensesAwaitingPayment > 0 ? 'negative' : 'neutral',
+      icon: <Receipt className="w-6 h-6" />,
+      color: 'orange',
+    },
+    {
+      label: 'Expenses (Month)',
+      value: formatMoney(expenseSummary.totalThisMonth, defaultCurrency),
+      change:
+        expenseSummary.pendingCount > 0 ? `${expenseSummary.pendingCount} pending` : 'all clear',
+      changeType: expenseSummary.pendingCount > 0 ? 'negative' : 'neutral',
+      icon: <TrendingUp className="w-6 h-6" />,
+      color: 'plum',
+    },
+    {
+      label: 'Deposits Today',
+      value: formatMoney(data.depositsToday, defaultCurrency),
+      change: 'today',
+      changeType: 'positive',
+      icon: <ArrowDownRight className="w-6 h-6" />,
+      color: 'teal',
+    },
+    {
+      label: 'Withdrawals Today',
+      value: formatMoney(data.withdrawalsToday, defaultCurrency),
+      change: 'today',
+      changeType: 'neutral',
+      icon: <ArrowUpRight className="w-6 h-6" />,
+      color: 'mint',
+    },
+    {
+      label: 'Float Balance',
+      value: `${currencyFlag(data.floatCurrency)} ${formatMoney(data.floatTotal, data.floatCurrency)}`,
+      change: floatChange,
+      changeType: 'neutral',
+      icon: <Landmark className="w-6 h-6" />,
+      color: 'deepTeal',
+    },
+  ];
+
+  const customerServiceStats: StatCard[] = [
+    {
+      label: 'KYC Pending',
+      value: data.kycPendingCount.toLocaleString(),
+      change: data.kycPendingCount > 0 ? 'needs verification' : 'all verified',
+      changeType: data.kycPendingCount > 0 ? 'negative' : 'positive',
+      icon: <ShieldAlert className="w-6 h-6" />,
+      color: 'orange',
+    },
+    {
+      label: 'New This Month',
+      value: data.newCustomersThisMonth.toLocaleString(),
+      change: 'customers onboarded',
+      changeType: 'positive',
+      icon: <UserPlus className="w-6 h-6" />,
+      color: 'teal',
+    },
+    {
+      label: 'Total Customers',
+      value: data.customerCount.toLocaleString(),
+      change: 'active',
+      changeType: 'neutral',
+      icon: <Users className="w-6 h-6" />,
+      color: 'purple',
+    },
+    {
+      label: 'Frozen Wallets',
+      value: data.frozenWalletCount.toLocaleString(),
+      change: data.frozenWalletCount > 0 ? 'need attention' : 'none frozen',
+      changeType: data.frozenWalletCount > 0 ? 'negative' : 'positive',
+      icon: <Ban className="w-6 h-6" />,
+      color: 'plum',
+    },
+    {
+      label: 'Wallets',
+      value: data.walletCount.toLocaleString(),
+      change: `${formatMoney(data.walletTotal, defaultCurrency)} total`,
+      changeType: 'neutral',
+      icon: <Wallet className="w-6 h-6" />,
+      color: 'mint',
+    },
+    {
+      label: 'Savings Accounts',
+      value: data.savingsCount.toLocaleString(),
+      change: `${formatMoney(data.savingsTotal, defaultCurrency)} balance`,
+      changeType: 'neutral',
+      icon: <PiggyBank className="w-6 h-6" />,
+      color: 'softOrange',
+    },
+  ];
+
+  const sharedStats: StatCard[] = [
     {
       label: 'Total Customers',
       value: data.customerCount.toLocaleString(),
@@ -477,6 +822,27 @@ export function DashboardPage() {
       color: 'plum', // #4a1646 (derived from #641f60)
     },
   ];
+
+  // Roles without a bespoke dashboard get the shared cards trimmed to what
+  // their navigation already allows, so the summary never advertises a page
+  // they cannot open.
+  const SHARED_CARDS_BY_ROLE: Record<string, string[]> = {
+    loan_officer: ['Total Customers', 'Active Loans', 'Savings Accounts'],
+    forex_officer: ['Total Customers', 'Float Balance', 'Deposits Today', 'Withdrawals Today', 'Wallets'],
+    compliance_officer: ['Total Customers', 'Deposits Today', 'Withdrawals Today'],
+    auditor: ['Deposits Today', 'Withdrawals Today', 'Expenses (Month)', 'Active Loans'],
+  };
+
+  const stats: StatCard[] =
+    role === 'teller' || role === 'cashier'
+      ? tellerStats
+      : role === 'accountant' || role === 'finance_officer'
+      ? accountantStats
+      : role === 'customer_service'
+      ? customerServiceStats
+      : SHARED_CARDS_BY_ROLE[role]
+      ? sharedStats.filter((c) => SHARED_CARDS_BY_ROLE[role].includes(c.label))
+      : sharedStats;
 
   // Every card gets its own distinct color — no repeats. Your 5 given hex
   // values are used as-is (purple, orange, teal, mint, and the light
@@ -754,7 +1120,10 @@ export function DashboardPage() {
           )}
         </div>
 
-        {/* Pending approvals */}
+        {/* Pending approvals — only for roles that can actually action them.
+            Showing a queue to someone whose navigation has no Approvals page
+            would just be a list they can never clear. */}
+        {APPROVAL_ROLES.has(role) && (
         <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
           <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between">
             <h2 className="font-semibold text-slate-900">Pending Approvals</h2>
@@ -801,10 +1170,12 @@ export function DashboardPage() {
             </div>
           )}
         </div>
+        )}
       </div>
 
-      {/* Branch overview (only when multiple branches) */}
-      {branches.length > 1 && (
+      {/* Branch overview — head office and managers only. A teller compares
+          nothing across branches; they work one till. */}
+      {branches.length > 1 && BRANCH_OVERVIEW_ROLES.has(role) && (
         <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
           <div className="px-5 py-4 border-b border-slate-200">
             <h2 className="font-semibold text-slate-900">Branch Overview</h2>

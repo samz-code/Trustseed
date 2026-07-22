@@ -33,6 +33,9 @@ export type TenantSettings = {
   timezone: string;
   language: string;
   website?: string | null;
+  /** Printed in the header of remittance vouchers and receipts. */
+  address?: string | null;
+  phone?: string | null;
   notification_settings: {
     sms_enabled: boolean;
     email_enabled: boolean;
@@ -247,6 +250,16 @@ export type Transaction = {
   loan_account_id?: string | null;
   /** Free-text approval reference captured at loan disbursement. */
   approval_reference?: string | null;
+
+  // --- Remittance voucher fields (voucher_fields_migration.sql) ------------
+  // Printed on the landscape remittance voucher. Optional so existing code
+  // that builds a Transaction without them still type-checks.
+  /** Sender physical address, printed on the voucher. */
+  sender_address?: string | null;
+  /** Sender ID/passport number, captured for compliance and printed. */
+  sender_id_number?: string | null;
+  /** Receiver payout city, printed alongside destination_country. */
+  receiver_city?: string | null;
 };
 
 export type TransactionType =
@@ -286,6 +299,34 @@ export type Subscription = {
   stripe_subscription_id: string | null;
   created_at: string;
   updated_at: string;
+};
+
+export type ExchangeRate = {
+  id: string;
+  tenant_id: string;
+  branch_id: string | null;
+  from_currency: string;
+  to_currency: string;
+  buy_rate: number;
+  sell_rate: number;
+  reference_rate: number | null;
+  is_active: boolean;
+  effective_from: string;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+
+  // --- Automatic daily rates (auto_rates_and_momo_migration.sql) ----------
+  // The market API supplies a MID rate. A bureau buys below and sells above
+  // it, and that difference is its margin, so the nightly job recomputes
+  // buy/sell from the mid using this spread rather than writing the mid into
+  // both. Optional so code predating the migration still type-checks.
+  /** Margin either side of mid. 1.0 means buy = mid-1%, sell = mid+1%. */
+  spread_percent?: number;
+  /** When false, the daily job skips this pair and it is priced by hand. */
+  auto_update?: boolean;
+  /** When the daily job last recalculated this pair. */
+  last_auto_update?: string | null;
 };
 
 export type AuthState = {
@@ -355,4 +396,155 @@ export type LoanAccount = {
   updated_at?: string;
   // Allow any additional columns your table defines.
   [key: string]: unknown;
+};
+
+// ============================================================================
+// PLATFORM OWNER (Trust Seed staff)
+// ----------------------------------------------------------------------------
+// Distinct from UserRole, which is institution-level. A subscriber's top admin
+// has UserRole 'super_admin'; that is NOT platform ownership. Platform staff
+// live in the separate platform_admins table and administer ALL institutions.
+// ============================================================================
+
+export type PlatformRole = 'platform_owner' | 'platform_admin' | 'platform_support';
+
+export type PlatformAdmin = {
+  id: string;
+  user_id: string;
+  email: string;
+  full_name: string;
+  role: PlatformRole;
+  status: 'active' | 'inactive';
+  created_at: string;
+  updated_at: string;
+};
+
+/** Shape returned by the platform_metrics() RPC. */
+export type PlatformMetrics = {
+  institutions_total: number;
+  institutions_active: number;
+  institutions_suspended: number;
+  users_total: number;
+  customers_total: number;
+  branches_total: number;
+  transactions_total: number;
+  transaction_volume: number;
+  mrr: number;
+};
+
+// ============================================================================
+// PLATFORM INVOICES
+// ----------------------------------------------------------------------------
+// A billing event: what Trust Seed charged an institution, for which period,
+// and once settled, how it was actually paid.
+//
+// Subscription amounts are always USD. When an institution settles in local
+// currency (e.g. M-Pesa in KES), the local amount AND the exchange rate used
+// at that moment are stored on the row, so a receipt printed a year later
+// still reflects what was really collected rather than today's rate.
+// ============================================================================
+
+export type PlatformInvoiceStatus = 'open' | 'paid' | 'overdue' | 'void';
+
+export type PlatformPaymentMethod = 'mpesa' | 'momo' | 'paypal' | 'bank' | 'card' | 'manual';
+
+export type PlatformInvoice = {
+  id: string;
+  invoice_number: string;
+  tenant_id: string;
+  subscription_id: string | null;
+  period_start: string;
+  period_end: string;
+  amount_usd: number;
+  plan: string;
+  billing_cycle: string;
+  status: PlatformInvoiceStatus;
+  issued_at: string;
+  due_at: string;
+  paid_at: string | null;
+  payment_method: PlatformPaymentMethod | null;
+  amount_paid_usd: number | null;
+  amount_paid_local: number | null;
+  local_currency: string | null;
+  fx_rate: number | null;
+  provider_reference: string | null;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+// ============================================================================
+// LOAN PRODUCTS AND APPLICATIONS
+// ----------------------------------------------------------------------------
+// These were referenced by LoansPage but never defined, so the page could not
+// type-check against real data. Shapes follow the loan_products and
+// loan_applications tables.
+// ============================================================================
+
+export type LoanInterestType = 'flat' | 'reducing_balance';
+
+export type LoanProduct = {
+  id: string;
+  tenant_id: string;
+  name: string;
+  code: string;
+  description: string | null;
+  min_amount: number;
+  max_amount: number | null;
+  interest_type: LoanInterestType;
+  min_interest_rate: number;
+  max_interest_rate: number | null;
+  default_interest_rate: number;
+  min_term_months: number;
+  max_term_months: number | null;
+  grace_period_days: number;
+  penalty_rate: number;
+  late_fee: number;
+  requires_collateral: boolean;
+  collateral_types: string[] | null;
+  status: 'active' | 'inactive';
+  created_at: string;
+  updated_at: string;
+};
+
+export type LoanApplicationStatus =
+  | 'draft'
+  | 'submitted'
+  | 'under_review'
+  | 'approved'
+  | 'rejected'
+  | 'withdrawn'
+  | 'disbursed';
+
+export type LoanApplication = {
+  id: string;
+  tenant_id: string;
+  branch_id: string | null;
+  customer_id: string;
+  product_id: string;
+  application_number: string;
+  requested_amount: number;
+  approved_amount: number | null;
+  currency: string;
+  term_months: number;
+  purpose: string | null;
+  collateral_type: string | null;
+  collateral_description: string | null;
+  collateral_value: number | null;
+  guarantor_name: string | null;
+  guarantor_phone: string | null;
+  monthly_income: number | null;
+  employment_status: string | null;
+  employer_name: string | null;
+  status: LoanApplicationStatus;
+  credit_score: number | null;
+  rejection_reason: string | null;
+  submitted_at: string | null;
+  reviewed_by: string | null;
+  reviewed_at: string | null;
+  approved_by: string | null;
+  approved_at: string | null;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
 };
