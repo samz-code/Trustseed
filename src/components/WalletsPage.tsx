@@ -1044,18 +1044,23 @@ export function WalletsPage() {
   };
 
   // Freeze / reactivate / close — the wallet's `status` column already
-  // existed and was displayed, but nothing in the UI could ever change it.
-  const setWalletStatus = async (wallet: WalletWithCustomer, status: 'active' | 'frozen' | 'closed') => {
-    if (!tenant) return;
+// Freeze / reactivate / close. Routed through wallet_set_status rather than
+  // a direct .update(), matching how every other wallet mutation on this page
+  // works. The function authorises the caller itself, so it does not depend on
+  // the wallets_update RLS policy.
+  const setWalletStatus = async (
+    wallet: WalletWithCustomer,
+    status: 'active' | 'frozen' | 'closed'
+  ) => {
     setStatusUpdating(true);
     setStatusError(null);
     try {
-      const { error: updateError } = await supabase
-        .from('wallets')
-        .update({ status } as never)
-        .eq('id', wallet.id)
-        .eq('tenant_id', tenant.id);
-      if (updateError) throw updateError;
+      const { error: rpcError } = await supabase.rpc('wallet_set_status', {
+        p_wallet_id: wallet.id,
+        p_status: status,
+      } as never);
+      if (rpcError) throw rpcError;
+
       await loadData();
       setDetailWallet((prev) => (prev && prev.id === wallet.id ? { ...prev, status } : prev));
     } catch (err) {
