@@ -12,6 +12,8 @@ const contactDetails = [
     icon: Phone,
     label: 'Phone',
     value: '+211927094644',
+    href: 'tel:+211927094644',
+    external: false,
     color: '#1ebcb2',
     breakAll: false,
   },
@@ -19,6 +21,8 @@ const contactDetails = [
     icon: Mail,
     label: 'Email',
     value: 'hello@trustseedmicrofinanceenterprises.com',
+    href: 'mailto:hello@trustseedmicrofinanceenterprises.com',
+    external: false,
     color: '#641f60',
     breakAll: true,
   },
@@ -27,6 +31,7 @@ const contactDetails = [
     label: 'Website',
     value: 'trustseedmicrofinanceenterprises.com',
     href: 'https://trustseedmicrofinanceenterprises.com',
+    external: true,
     color: '#c46040',
     breakAll: true,
   },
@@ -50,8 +55,13 @@ export function Contact() {
           <div className="lg:col-span-2 space-y-4 w-full min-w-0">
             {contactDetails.map((detail, idx) => {
               const Icon = detail.icon;
+              const isLink = Boolean(detail.href);
               const content = (
-                <div className="flex items-start gap-4 bg-white rounded-xl p-4 sm:p-5 border border-slate-200 shadow-sm hover:shadow-md hover:border-[#1ebcb2]/40 transition-all w-full min-w-0">
+                <div
+                  className={`flex items-start gap-4 bg-white rounded-xl p-4 sm:p-5 border border-slate-200 shadow-sm transition-all w-full min-w-0 ${
+                    isLink ? 'hover:shadow-md hover:border-[#1ebcb2]/40' : ''
+                  }`}
+                >
                   <div
                     className="w-11 h-11 rounded-lg flex items-center justify-center flex-shrink-0"
                     style={{ backgroundColor: `${detail.color}1A` }}
@@ -65,7 +75,7 @@ export function Contact() {
                     <p
                       className={`text-slate-900 font-medium ${
                         detail.breakAll ? 'break-all' : 'break-words'
-                      }`}
+                      } ${isLink ? 'group-hover:text-[#1ebcb2] transition-colors' : ''}`}
                     >
                       {detail.value}
                     </p>
@@ -74,12 +84,14 @@ export function Contact() {
               );
 
               return detail.href ? (
-                <a
+                
                   key={idx}
                   href={detail.href}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="block w-full min-w-0"
+                  {...(detail.external
+                    ? { target: '_blank', rel: 'noopener noreferrer' }
+                    : {})}
+                  aria-label={`${detail.label}: ${detail.value}`}
+                  className="group block w-full min-w-0 focus:outline-none focus-visible:ring-2 focus-visible:ring-[#1ebcb2] rounded-xl"
                 >
                   {content}
                 </a>
