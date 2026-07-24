@@ -1,21 +1,33 @@
-import type { MouseEvent } from 'react';
+import type { MouseEvent, KeyboardEvent } from 'react';
 import { Building2, Clock, Globe, Mail, MessageSquare, Phone, Send, User } from 'lucide-react';
 
 const EMAIL = 'hello@trustseedmicrofinanceenterprises.com';
 const PHONE = '+211927094644';
+const WEBSITE = 'https://trustseedmicrofinanceenterprises.com';
 const MAIL_SUBJECT = 'TrustSeed Enquiry';
 const MAIL_BODY = 'Hello TrustSeed team,\n\nI would like to know more about your platform.\n\nInstitution:\nName:\n';
 
-const mailtoHref = `mailto:${EMAIL}?subject=${encodeURIComponent(MAIL_SUBJECT)}&body=${encodeURIComponent(MAIL_BODY)}`;
-const gmailHref = `https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(EMAIL)}&su=${encodeURIComponent(MAIL_SUBJECT)}&body=${encodeURIComponent(MAIL_BODY)}`;
+const mailtoHref =
+  'mailto:' +
+  EMAIL +
+  '?subject=' +
+  encodeURIComponent(MAIL_SUBJECT) +
+  '&body=' +
+  encodeURIComponent(MAIL_BODY);
+
+const gmailHref =
+  'https://mail.google.com/mail/?view=cm&fs=1&to=' +
+  encodeURIComponent(EMAIL) +
+  '&su=' +
+  encodeURIComponent(MAIL_SUBJECT) +
+  '&body=' +
+  encodeURIComponent(MAIL_BODY);
 
 type ContactDetail = {
   icon: typeof Building2;
   label: string;
   value: string;
-  href?: string;
-  external?: boolean;
-  isEmail?: boolean;
+  action?: 'email' | 'phone' | 'website';
   color: string;
   breakAll: boolean;
 };
@@ -32,8 +44,7 @@ const contactDetails: ContactDetail[] = [
     icon: Phone,
     label: 'Phone',
     value: PHONE,
-    href: `tel:${PHONE}`,
-    external: false,
+    action: 'phone',
     color: '#1ebcb2',
     breakAll: false,
   },
@@ -41,9 +52,7 @@ const contactDetails: ContactDetail[] = [
     icon: Mail,
     label: 'Email',
     value: EMAIL,
-    href: mailtoHref,
-    external: false,
-    isEmail: true,
+    action: 'email',
     color: '#641f60',
     breakAll: true,
   },
@@ -51,40 +60,62 @@ const contactDetails: ContactDetail[] = [
     icon: Globe,
     label: 'Website',
     value: 'trustseedmicrofinanceenterprises.com',
-    href: 'https://trustseedmicrofinanceenterprises.com',
-    external: true,
+    action: 'website',
     color: '#c46040',
     breakAll: true,
   },
 ];
 
+function openEmailClient() {
+  const before = Date.now();
+  let handled = false;
+
+  const markHandled = () => {
+    handled = true;
+  };
+
+  window.addEventListener('blur', markHandled, { once: true });
+  document.addEventListener('visibilitychange', markHandled, { once: true });
+
+  window.location.href = mailtoHref;
+
+  window.setTimeout(() => {
+    window.removeEventListener('blur', markHandled);
+    document.removeEventListener('visibilitychange', markHandled);
+
+    const stillHere = !handled && !document.hidden && Date.now() - before < 2500;
+    if (stillHere) {
+      window.open(gmailHref, '_blank', 'noopener,noreferrer');
+    }
+  }, 1200);
+}
+
+function runAction(action: ContactDetail['action']) {
+  if (action === 'email') {
+    openEmailClient();
+    return;
+  }
+  if (action === 'phone') {
+    window.location.href = 'tel:' + PHONE;
+    return;
+  }
+  if (action === 'website') {
+    window.open(WEBSITE, '_blank', 'noopener,noreferrer');
+  }
+}
+
 export function Contact() {
-  const handleEmailClick = (e: MouseEvent<HTMLAnchorElement>) => {
-    if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
-
+  const handleClick = (detail: ContactDetail) => (e: MouseEvent<HTMLDivElement>) => {
+    if (!detail.action) return;
     e.preventDefault();
+    runAction(detail.action);
+  };
 
-    const before = Date.now();
-    let handled = false;
-
-    const markHandled = () => {
-      handled = true;
-    };
-
-    window.addEventListener('blur', markHandled, { once: true });
-    document.addEventListener('visibilitychange', markHandled, { once: true });
-
-    window.location.href = mailtoHref;
-
-    window.setTimeout(() => {
-      window.removeEventListener('blur', markHandled);
-      document.removeEventListener('visibilitychange', markHandled);
-
-      const stillHere = !handled && !document.hidden && Date.now() - before < 2500;
-      if (stillHere) {
-        window.open(gmailHref, '_blank', 'noopener,noreferrer');
-      }
-    }, 1200);
+  const handleKeyDown = (detail: ContactDetail) => (e: KeyboardEvent<HTMLDivElement>) => {
+    if (!detail.action) return;
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    e.preventDefault();
+    runAction(detail.action);
   };
 
   return (
@@ -104,17 +135,24 @@ export function Contact() {
           <div className="lg:col-span-2 space-y-4 w-full min-w-0">
             {contactDetails.map((detail, idx) => {
               const Icon = detail.icon;
-              const isLink = Boolean(detail.href);
+              const clickable = Boolean(detail.action);
 
-              const content = (
+              return (
                 <div
-                  className={`flex items-start gap-4 bg-white rounded-xl p-4 sm:p-5 border border-slate-200 shadow-sm transition-all w-full min-w-0 ${
-                    isLink ? 'hover:shadow-md hover:border-[#1ebcb2]/40 cursor-pointer' : ''
-                  }`}
+                  key={idx}
+                  role={clickable ? 'button' : undefined}
+                  tabIndex={clickable ? 0 : undefined}
+                  aria-label={clickable ? detail.label + ': ' + detail.value : undefined}
+                  onClick={handleClick(detail)}
+                  onKeyDown={handleKeyDown(detail)}
+                  className={
+                    'group flex items-start gap-4 bg-white rounded-xl p-4 sm:p-5 border border-slate-200 shadow-sm transition-all w-full min-w-0 focus:outline-none focus-visible:ring-2 focus-visible:ring-[#1ebcb2] ' +
+                    (clickable ? 'cursor-pointer hover:shadow-md hover:border-[#1ebcb2]/40' : '')
+                  }
                 >
                   <div
                     className="w-11 h-11 rounded-lg flex items-center justify-center flex-shrink-0"
-                    style={{ backgroundColor: `${detail.color}1A` }}
+                    style={{ backgroundColor: detail.color + '1A' }}
                   >
                     <Icon className="w-5 h-5" style={{ color: detail.color }} />
                   </div>
@@ -123,36 +161,16 @@ export function Contact() {
                       {detail.label}
                     </p>
                     <p
-                      className={`text-slate-900 font-medium ${
-                        detail.breakAll ? 'break-all' : 'break-words'
-                      } ${isLink ? 'group-hover:text-[#1ebcb2] transition-colors' : ''}`}
+                      className={
+                        'text-slate-900 font-medium ' +
+                        (detail.breakAll ? 'break-all ' : 'break-words ') +
+                        (clickable ? 'group-hover:text-[#1ebcb2] transition-colors' : '')
+                      }
                     >
                       {detail.value}
                     </p>
                   </div>
                 </div>
-              );
-
-              if (!detail.href) {
-                return (
-                  <div key={idx} className="w-full min-w-0">
-                    {content}
-                  </div>
-                );
-              }
-
-              return (
-                
-                  key={idx}
-                  href={detail.href}
-                  onClick={detail.isEmail ? handleEmailClick : undefined}
-                  target={detail.external ? '_blank' : undefined}
-                  rel={detail.external ? 'noopener noreferrer' : undefined}
-                  aria-label={`${detail.label}: ${detail.value}`}
-                  className="group block w-full min-w-0 rounded-xl focus:outline-none focus-visible:ring-2 focus-visible:ring-[#1ebcb2]"
-                >
-                  {content}
-                </a>
               );
             })}
 
