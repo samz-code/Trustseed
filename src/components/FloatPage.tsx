@@ -36,7 +36,7 @@ import {
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 
-// Transaction row shape as stored on `transactions` — using the generated
+// Transaction row shape as stored on `transactions` - using the generated
 // Supabase type directly (rather than a hand-rolled interface) so this stays
 // correct if the schema changes.
 type LedgerTransaction = Tables<'transactions'>;
@@ -58,7 +58,7 @@ const CURRENCY_NAMES: Record<string, string> = {
   GBP: 'British Pound',
 };
 
-// Real national flags rendered as inline SVG, clipped to a circle — same
+// Real national flags rendered as inline SVG, clipped to a circle - same
 // treatment as TransactionsPage so currency reads consistently across the app.
 function FlagGraphic({ code }: { code: string }) {
   switch (code) {
@@ -236,7 +236,7 @@ function CurrencySelect({ value, onChange }: { value: string; onChange: (v: stri
         <CurrencyBadge code={value} />
         <span className="flex-1 min-w-0 truncate text-slate-900">
           <span className="font-medium">{value}</span>
-          <span className="hidden sm:inline text-slate-400"> · {CURRENCY_NAMES[value] || value}</span>
+          <span className="hidden sm:inline text-slate-400"> - {CURRENCY_NAMES[value] || value}</span>
         </span>
         <ChevronDown className="w-4 h-4 text-slate-400 flex-shrink-0" />
       </button>
@@ -282,7 +282,7 @@ const FLOAT_TYPES: { value: string; label: string; Icon: LucideIcon }[] = [
 
 const STATUS_OPTIONS: FloatAccount['status'][] = ['active', 'inactive', 'frozen'];
 
-// Funding sources for a tracked top-up — mirrors the payment-source options
+// Funding sources for a tracked top-up - mirrors the payment-source options
 // used on the "Add Funds (Float)" transaction type in Transactions, so a
 // capital injection looks the same regardless of where it was started.
 type FundingSource = 'cash' | 'momo' | 'mpesa' | 'bank';
@@ -323,7 +323,7 @@ function statusBadgeStyle(status: string) {
 }
 
 // ============================================================================
-// Float account activity ledger — resolves which customers' transactions
+// Float account activity ledger - resolves which customers' transactions
 // actually moved through a given float account, so Float isn't just a
 // balance number in isolation.
 // ============================================================================
@@ -408,7 +408,6 @@ function ledgerStatusBadge(status: string) {
     </span>
   );
 }
-
 
 // ============================================================================
 
@@ -511,15 +510,22 @@ export function FloatPage() {
   const [selectedAccount, setSelectedAccount] = useState<FloatAccount | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
 
+  // Delete failures are shown inside the details panel rather than the
+  // page-level banner, which sits behind the modal overlay and is invisible
+  // while the panel is open - the reason a rejected delete looked like a
+  // dead button.
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+
   // Activity ledger for whichever account is currently open in the detail
-  // panel — which customers' transactions actually moved through it.
+  // panel - which customers' transactions actually moved through it.
   const [accountTransactions, setAccountTransactions] = useState<LedgerTransaction[]>([]);
   const [ledgerWalletLabels, setLedgerWalletLabels] = useState<Record<string, string>>({});
   const [ledgerCustomerNames, setLedgerCustomerNames] = useState<Record<string, string>>({});
   const [loadingLedger, setLoadingLedger] = useState(false);
   const [ledgerError, setLedgerError] = useState<string | null>(null);
 
-  // Tracked "Add Funds" (capital injection) — the only way to increase an
+  // Tracked "Add Funds" (capital injection) - the only way to increase an
   // EXISTING account's balance. Every top-up writes a real transaction row
   // (transaction_type: 'float_allocation') so the movement is traceable,
   // instead of letting the edit form silently overwrite the balance number.
@@ -574,7 +580,7 @@ export function FloatPage() {
 
   // Loads recent transactions tied to a float account (via float_account_id)
   // and resolves any linked customer ids to display names, so the ledger
-  // reads "Jane Wanjiru → John Otieno" instead of raw uuids.
+  // reads "Jane Wanjiru -> John Otieno" instead of raw uuids.
   const loadAccountLedger = useCallback(
     async (accountId: string) => {
       if (!tenant) return;
@@ -670,6 +676,8 @@ export function FloatPage() {
       setLedgerCustomerNames({});
       setLedgerWalletLabels({});
       setLedgerError(null);
+      setDeleteError(null);
+      setConfirmDeleteId(null);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedAccount?.id]);
@@ -733,7 +741,7 @@ export function FloatPage() {
       return;
     }
     if (formData.scope === 'branch' && !branch) {
-      setFormError('No branch context available — choose "Tenant-wide" instead');
+      setFormError('No branch context available - choose "Tenant-wide" instead');
       return;
     }
 
@@ -742,10 +750,10 @@ export function FloatPage() {
       if (!tenant) throw new Error('Missing tenant');
 
       if (editingId) {
-        // Editing NEVER touches balance — that's only ever moved through a
+        // Editing NEVER touches balance - that's only ever moved through a
         // tracked transaction (see handleTopUp). This form only edits the
         // account's configuration (type, currency, thresholds, status).
-        const { error: updateError } = await supabase
+        const { data, error: updateError } = await supabase
           .from('float_accounts')
           .update({
             float_type: formData.float_type,
@@ -755,11 +763,19 @@ export function FloatPage() {
             status: formData.status,
           } as never)
           .eq('id', editingId)
-          .eq('tenant_id', tenant.id);
+          .eq('tenant_id', tenant.id)
+          .select('id');
         if (updateError) throw updateError;
+        // A silent RLS rejection returns success with no rows. Without this
+        // check the modal closes as if the edit saved.
+        if (!data || data.length === 0) {
+          throw new Error(
+            'The update was rejected. Your role may not have permission to edit float accounts.'
+          );
+        }
       } else {
         // Creating a brand-new account is the one place a balance number can
-        // be entered directly — it's an opening balance, the same way Daily
+        // be entered directly - it's an opening balance, the same way Daily
         // Opening records a starting position, not a balance overwrite.
         const payload = {
           tenant_id: tenant.id,
@@ -771,8 +787,16 @@ export function FloatPage() {
           max_threshold: formData.max_threshold,
           status: formData.status,
         };
-        const { error: insertError } = await supabase.from('float_accounts').insert(payload as never);
+        const { data, error: insertError } = await supabase
+          .from('float_accounts')
+          .insert(payload as never)
+          .select('id');
         if (insertError) throw insertError;
+        if (!data || data.length === 0) {
+          throw new Error(
+            'The account was not created. Your role may not have permission to add float accounts.'
+          );
+        }
       }
 
       await loadData();
@@ -784,21 +808,76 @@ export function FloatPage() {
     }
   };
 
+  // --- Delete ----------------------------------------------------------------
+  //
+  // Deleting a till is destructive and easy to do by accident next to "Edit",
+  // so it asks for confirmation first. The delete itself requests the removed
+  // row back with `.select()`: without that, an RLS policy that forbids the
+  // delete returns `{ data: null, error: null }` - success with nothing
+  // deleted - and the account quietly reappears on the next load, which is
+  // exactly what a broken button looks like.
+
+  const requestDelete = (id: string) => {
+    setDeleteError(null);
+    setConfirmDeleteId(id);
+  };
+
+  const cancelDelete = () => {
+    setConfirmDeleteId(null);
+  };
+
   const handleDelete = async (id: string) => {
     if (!tenant) return;
+
+    const account = accounts.find((a) => a.id === id);
+
+    // A till holding money should be emptied through a tracked withdrawal or
+    // transfer, not deleted with the balance still on it - otherwise the
+    // money vanishes from the books with no corresponding movement.
+    if (account && Number(account.balance || 0) !== 0) {
+      setDeleteError(
+        `This till still holds ${account.currency} ${formatMoney(
+          Number(account.balance)
+        )}. Withdraw or transfer the balance to zero before deleting it.`
+      );
+      setConfirmDeleteId(null);
+      return;
+    }
+
+    setDeleteError(null);
     setDeletingId(id);
     try {
-      const { error: deleteError } = await supabase
+      const { data, error: deleteError } = await supabase
         .from('float_accounts')
         .delete()
         .eq('id', id)
-        .eq('tenant_id', tenant.id);
-      if (deleteError) throw deleteError;
+        .eq('tenant_id', tenant.id)
+        .select('id');
+
+      if (deleteError) {
+        // 23503: transactions still reference this float account. The history
+        // is worth more than the tidy list, so deactivating is the answer.
+        if ((deleteError as { code?: string }).code === '23503') {
+          throw new Error(
+            'This account has transaction history and cannot be deleted. Set its status to Inactive instead, which hides it without losing the records.'
+          );
+        }
+        throw deleteError;
+      }
+
+      if (!data || data.length === 0) {
+        throw new Error(
+          'The delete was rejected by the database. Your role may not have permission to remove float accounts.'
+        );
+      }
+
       await loadData();
+      setConfirmDeleteId(null);
       setSelectedAccount(null);
     } catch (err) {
       console.error('Error deleting float account:', err);
-      setError(err instanceof Error ? err.message : 'Failed to delete float account');
+      setDeleteError(err instanceof Error ? err.message : 'Failed to delete float account');
+      setConfirmDeleteId(null);
     } finally {
       setDeletingId(null);
     }
@@ -1056,7 +1135,7 @@ export function FloatPage() {
         </div>
       )}
 
-      {/* Per-currency totals — horizontally scrollable on small screens so
+      {/* Per-currency totals - horizontally scrollable on small screens so
           an arbitrary number of currencies never breaks the layout */}
       <div className="flex gap-4 overflow-x-auto pb-1 -mx-1 px-1 snap-x snap-mandatory sm:grid sm:grid-cols-2 lg:grid-cols-3 sm:overflow-visible">
         {currencyTotals.length > 0 ? (
@@ -1299,7 +1378,7 @@ export function FloatPage() {
                       </button>
                     </div>
                     <p className="text-xs text-slate-400 mt-1">
-                      Balance only changes through a tracked transaction — use "Add Funds" to top it up.
+                      Balance only changes through a tracked transaction - use "Add Funds" to top it up.
                     </p>
                   </Field>
                 ) : (
@@ -1385,7 +1464,7 @@ export function FloatPage() {
                 </div>
                 {editingId && (
                   <p className="text-xs text-slate-400 mt-1">
-                    Scope can't be changed after creation — create a new account to move to a different branch.
+                    Scope can't be changed after creation - create a new account to move to a different branch.
                   </p>
                 )}
               </Field>
@@ -1445,7 +1524,7 @@ export function FloatPage() {
         </div>
       )}
 
-      {/* Add Funds modal — the only path that increases an existing
+      {/* Add Funds modal - the only path that increases an existing
           account's balance, and it's always backed by a transaction row. */}
       {topUpAccount && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
@@ -1711,7 +1790,7 @@ export function FloatPage() {
                     <option value="">Choose a till</option>
                     {transferTargets.map((a) => (
                       <option key={a.id} value={a.id}>
-                        {floatTypeLabel(a.float_type)} — {a.currency}{' '}
+                        {floatTypeLabel(a.float_type)} - {a.currency}{' '}
                         {formatMoney(Number(a.balance || 0))}
                       </option>
                     ))}
@@ -1851,7 +1930,7 @@ export function FloatPage() {
                   <p className="font-medium text-slate-900">
                     {selectedAccount.min_threshold != null
                       ? `${selectedAccount.currency} ${formatMoney(selectedAccount.min_threshold)}`
-                      : '—'}
+                      : '-'}
                   </p>
                 </div>
                 <div>
@@ -1859,7 +1938,7 @@ export function FloatPage() {
                   <p className="font-medium text-slate-900">
                     {selectedAccount.max_threshold != null
                       ? `${selectedAccount.currency} ${formatMoney(selectedAccount.max_threshold)}`
-                      : '—'}
+                      : '-'}
                   </p>
                 </div>
                 <div>
@@ -1884,7 +1963,7 @@ export function FloatPage() {
                   </div>
                 )}
 
-              {/* Recent Activity — which customers' transactions actually
+              {/* Recent Activity - which customers' transactions actually
                   moved through this float account. */}
               <div className="border-t border-slate-200 pt-4">
                 <h3 className="text-sm font-semibold text-slate-900 mb-3 flex items-center gap-2">
@@ -1974,29 +2053,83 @@ export function FloatPage() {
               </div>
             </div>
 
-            {/* Fixed footer */}
-            <div className="flex items-center justify-between gap-3 px-4 sm:px-6 py-4 border-t border-[#dae1e1] flex-shrink-0 bg-white">
-              <button
-                type="button"
-                onClick={() => handleDelete(selectedAccount.id)}
-                disabled={deletingId === selectedAccount.id}
-                className="px-4 py-2.5 border border-[#c46040]/30 text-[#c46040] font-medium rounded-lg hover:bg-[#c46040]/10 disabled:opacity-50 flex items-center gap-2"
-              >
-                {deletingId === selectedAccount.id ? (
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                ) : (
-                  <Trash2 className="w-4 h-4" />
-                )}
-                Delete
-              </button>
-              <button
-                type="button"
-                onClick={() => openEditForm(selectedAccount)}
-                className="px-6 py-2.5 bg-[#ee7b22] hover:bg-[#c46040] text-white font-medium rounded-lg shadow-lg flex items-center gap-2"
-              >
-                <Pencil className="w-4 h-4" />
-                Edit
-              </button>
+            {/* Fixed footer. The delete error renders HERE rather than in the
+                page-level banner, which sits behind this overlay and would be
+                invisible while the panel is open. */}
+            <div className="border-t border-[#dae1e1] flex-shrink-0 bg-white">
+              {deleteError && (
+                <div className="mx-4 sm:mx-6 mt-4 p-3 bg-[#c46040]/10 border border-[#c46040]/30 rounded-lg text-[#c46040] text-sm flex items-start gap-2">
+                  <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+                  <span className="flex-1">{deleteError}</span>
+                  <button
+                    type="button"
+                    onClick={() => setDeleteError(null)}
+                    className="flex-shrink-0 hover:opacity-70"
+                    aria-label="Dismiss"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+              )}
+
+              {confirmDeleteId === selectedAccount.id ? (
+                // Two-step confirm: deleting a till sits right next to Edit,
+                // and a misclick would otherwise remove it outright.
+                <div className="px-4 sm:px-6 py-4 space-y-3">
+                  <p className="text-sm text-slate-700">
+                    Delete this {floatTypeLabel(selectedAccount.float_type)} till permanently? This
+                    cannot be undone.
+                  </p>
+                  <div className="flex items-center justify-end gap-3">
+                    <button
+                      type="button"
+                      onClick={cancelDelete}
+                      disabled={deletingId === selectedAccount.id}
+                      className="px-4 py-2.5 border border-slate-300 text-slate-700 font-medium rounded-lg hover:bg-slate-50 disabled:opacity-50"
+                    >
+                      Keep it
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleDelete(selectedAccount.id)}
+                      disabled={deletingId === selectedAccount.id}
+                      className="px-6 py-2.5 bg-[#c46040] hover:bg-[#a54d33] text-white font-medium rounded-lg shadow-lg disabled:opacity-50 flex items-center gap-2"
+                    >
+                      {deletingId === selectedAccount.id ? (
+                        <>
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                          Deleting...
+                        </>
+                      ) : (
+                        <>
+                          <Trash2 className="w-4 h-4" />
+                          Yes, delete
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex items-center justify-between gap-3 px-4 sm:px-6 py-4">
+                  <button
+                    type="button"
+                    onClick={() => requestDelete(selectedAccount.id)}
+                    disabled={deletingId === selectedAccount.id}
+                    className="px-4 py-2.5 border border-[#c46040]/30 text-[#c46040] font-medium rounded-lg hover:bg-[#c46040]/10 disabled:opacity-50 flex items-center gap-2"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                    Delete
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => openEditForm(selectedAccount)}
+                    className="px-6 py-2.5 bg-[#ee7b22] hover:bg-[#c46040] text-white font-medium rounded-lg shadow-lg flex items-center gap-2"
+                  >
+                    <Pencil className="w-4 h-4" />
+                    Edit
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         </div>

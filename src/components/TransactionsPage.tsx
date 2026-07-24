@@ -247,7 +247,7 @@ const PAYMENT_SOURCES: { value: PaymentSource; label: string; icon: React.ReactN
 // Threshold above which a transaction needs sign-off purely on size, even if
 // it's domestic. Kept as a named constant so it's easy to make configurable
 // per-tenant later instead of hardcoded here.
-const LARGE_AMOUNT_APPROVAL_THRESHOLD = 1000;
+const LARGE_AMOUNT_APPROVAL_THRESHOLD = 1000000;
 
 type RequiredRole = 'branch_manager' | 'compliance_officer';
 

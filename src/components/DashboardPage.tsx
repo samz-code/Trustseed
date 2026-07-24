@@ -1,8 +1,19 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { supabase } from '../lib/supabase';
 import { fetchExpenseSummary, type ExpenseSummary } from '../lib/expenses';
-import { formatMoney, currencyFlag } from '../lib/accountCurrencies';
+import { formatMoney } from '../lib/accountCurrencies';
+import {
+  useDashboardRates,
+  bucketByCurrency,
+  convertToBase,
+  emptyTotal,
+  rateSummary,
+  formatAsOf,
+  breakdownLine,
+  type ConvertedTotal,
+} from '../lib/currencyAggregate';
+import { lookupRate } from '../lib/forexRates';
 import {
   Users,
   Wallet,
@@ -32,6 +43,8 @@ interface StatCard {
   changeType: ChangeType;
   icon: React.ReactNode;
   color: string;
+  /** Native-currency breakdown, shown as a title tooltip when present. */
+  tooltip?: string;
 }
 
 interface RecentTx {
@@ -65,17 +78,24 @@ interface PendingApproval {
 interface DashboardData {
   customerCount: number;
   walletCount: number;
-  walletTotal: number;
-  depositsToday: number;
-  withdrawalsToday: number;
+
+  // --- Money figures ----------------------------------------------------
+  // Every one of these is a ConvertedTotal, not a bare number. Balances are
+  // held in many currencies (KES wallets, USD wallets, UGX loans) and adding
+  // the raw amounts together produces a meaningless figure. Each total is
+  // bucketed by its own currency and converted into the institution base
+  // currency at the active Forex Trading rate, carrying the rates applied
+  // and any currency that had no rate path.
+  walletTotal: ConvertedTotal;
+  depositsToday: ConvertedTotal;
+  withdrawalsToday: ConvertedTotal;
   activeLoanCount: number;
-  loanOutstanding: number;
+  loanOutstanding: ConvertedTotal;
   savingsCount: number;
-  savingsTotal: number;
-  floatTotal: number;
-  floatCurrency: string;
-  floatCurrencyCount: number;
+  savingsTotal: ConvertedTotal;
+  floatTotal: ConvertedTotal;
   floatAccountCount: number;
+
   recentTransactions: RecentTx[];
   pendingApprovals: PendingApproval[];
 
@@ -85,13 +105,14 @@ interface DashboardData {
 
   /** Teller / cashier: this person's own activity, not the branch's. */
   myTxCountToday: number;
-  myCashInToday: number;
-  myCashOutToday: number;
+  myCashInToday: ConvertedTotal;
+  myCashOutToday: ConvertedTotal;
+  myNetToday: ConvertedTotal;
 
   /** Accountant / finance: what still needs their attention. */
   unpostedJournalCount: number;
   expensesAwaitingPayment: number;
-  expensesAwaitingPaymentTotal: number;
+  expensesAwaitingPaymentTotal: ConvertedTotal;
 
   /** Customer service: onboarding and account health. */
   kycPendingCount: number;
@@ -99,32 +120,33 @@ interface DashboardData {
   newCustomersThisMonth: number;
 }
 
-const EMPTY: DashboardData = {
+// EMPTY is a factory rather than a constant because the converted totals
+// need to know which base currency they are reporting in.
+const makeEmpty = (base: string): DashboardData => ({
   customerCount: 0,
   walletCount: 0,
-  walletTotal: 0,
-  depositsToday: 0,
-  withdrawalsToday: 0,
+  walletTotal: emptyTotal(base),
+  depositsToday: emptyTotal(base),
+  withdrawalsToday: emptyTotal(base),
   activeLoanCount: 0,
-  loanOutstanding: 0,
+  loanOutstanding: emptyTotal(base),
   savingsCount: 0,
-  savingsTotal: 0,
-  floatTotal: 0,
-  floatCurrency: 'KES',
-  floatCurrencyCount: 0,
+  savingsTotal: emptyTotal(base),
+  floatTotal: emptyTotal(base),
   floatAccountCount: 0,
   recentTransactions: [],
   pendingApprovals: [],
   myTxCountToday: 0,
-  myCashInToday: 0,
-  myCashOutToday: 0,
+  myCashInToday: emptyTotal(base),
+  myCashOutToday: emptyTotal(base),
+  myNetToday: emptyTotal(base),
   unpostedJournalCount: 0,
   expensesAwaitingPayment: 0,
-  expensesAwaitingPaymentTotal: 0,
+  expensesAwaitingPaymentTotal: emptyTotal(base),
   kycPendingCount: 0,
   frozenWalletCount: 0,
   newCustomersThisMonth: 0,
-};
+});
 
 // Who can act on an approval queue. Anyone else would be shown a list they
 // have no page to clear it from.
@@ -172,17 +194,53 @@ function customerLabel(row: {
 export function DashboardPage() {
   const { tenant, admin, branch, branches } = useAuth();
 
-  const [data, setData] = useState<DashboardData>(EMPTY);
-  const [expenseSummary, setExpenseSummary] = useState<ExpenseSummary>(EMPTY_EXPENSES);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
   // Prefer the institution base currency (shared with Daily Operations),
   // falling back to the legacy default_currency, then KES.
   const defaultCurrency =
     (tenant?.settings as { base_currency?: string; default_currency?: string } | null)?.base_currency ||
     (tenant?.settings as { default_currency?: string } | null)?.default_currency ||
     'KES';
+
+  // Active rates from the Forex Trading module. Every money figure below is
+  // reported in `defaultCurrency` using these, so the dashboard can state
+  // which rate it used and when that rate was set.
+  const {
+    rates,
+    asOf: ratesAsOf,
+    loading: ratesLoading,
+    error: ratesError,
+    reload: reloadRates,
+  } = useDashboardRates(tenant?.id);
+
+  // The currency the figures are DISPLAYED in. Defaults to the institution
+  // base currency, but Daniel can switch it to view the whole dashboard in
+  // USD, SSP, or anything else that has a rate path. Storage is unaffected:
+  // this only changes what the cards are converted into.
+  const [displayCurrency, setDisplayCurrency] = useState<string>(defaultCurrency);
+
+  // Keep display in step if the institution base currency itself changes.
+  useEffect(() => {
+    setDisplayCurrency(defaultCurrency);
+  }, [defaultCurrency]);
+
+  // Currencies worth offering: the base, plus every currency reachable from
+  // it through the active rate graph. Offering a currency with no rate path
+  // would just produce a dashboard of excluded figures.
+  const currencyOptions = useMemo(() => {
+    const codes = new Set<string>([defaultCurrency.toUpperCase()]);
+    Object.values(rates).forEach((r) => {
+      codes.add(r.from_currency.toUpperCase());
+      codes.add(r.to_currency.toUpperCase());
+    });
+    return Array.from(codes)
+      .filter((c) => c === defaultCurrency.toUpperCase() || lookupRate(rates, defaultCurrency, c) !== null)
+      .sort();
+  }, [rates, defaultCurrency]);
+
+  const [data, setData] = useState<DashboardData>(() => makeEmpty(defaultCurrency));
+  const [expenseSummary, setExpenseSummary] = useState<ExpenseSummary>(EMPTY_EXPENSES);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   // Whether to scope to the selected branch. Head office / super admin see the
   // whole tenant; branch-level roles are scoped to their branch.
@@ -195,6 +253,11 @@ export function DashboardPage() {
 
   const loadDashboard = useCallback(async () => {
     if (!tenant) return;
+    // Wait for rates. Converting against an empty rate map would push every
+    // foreign currency into `unconverted` and flash wrong figures on first
+    // paint before correcting itself.
+    if (ratesLoading) return;
+
     setLoading(true);
     setError(null);
 
@@ -207,6 +270,13 @@ export function DashboardPage() {
       const scopeBranch = <T extends { eq: (c: string, v: string) => T }>(q: T): T =>
         !seesAllBranches && branchId ? q.eq('branch_id', branchId) : q;
 
+      // Bucket rows by their own currency, then convert to the base currency
+      // at active rates. Used for every money total on this page.
+      // Rows are bucketed with the institution base as the fallback for any
+      // row missing a currency, then converted into the DISPLAY currency.
+      const toBase = (rows: { amount: number; currency: string | null }[]): ConvertedTotal =>
+        convertToBase(bucketByCurrency(rows, defaultCurrency), displayCurrency, rates);
+
       // --- Customers count ---
       let customersQuery = supabase
         .from('customers')
@@ -218,52 +288,70 @@ export function DashboardPage() {
       if (customersRes.error) throw customersRes.error;
 
       // --- Wallets (count + total balance) ---
+      // `currency` is selected so balances in different currencies are never
+      // added together as if they were the same unit.
       let walletsQuery = supabase
         .from('wallets')
-        .select('balance, branch_id')
+        .select('balance, currency, branch_id')
         .eq('tenant_id', tenant!.id)
         .eq('status', 'active');
       walletsQuery = scopeBranch(walletsQuery);
       const walletsRes = await walletsQuery;
       if (walletsRes.error) throw walletsRes.error;
-      const wallets = walletsRes.data ?? [];
-      const walletTotal = wallets.reduce((sum, w) => sum + Number(w.balance || 0), 0);
+      const wallets = (walletsRes.data ?? []) as {
+        balance: number | null;
+        currency: string | null;
+      }[];
+      const walletTotal = toBase(
+        wallets.map((w) => ({ amount: Number(w.balance || 0), currency: w.currency }))
+      );
 
       // --- Active loans (count + outstanding) ---
       let loansQuery = supabase
         .from('loan_accounts')
-        .select('total_outstanding, branch_id')
+        .select('total_outstanding, currency, branch_id')
         .eq('tenant_id', tenant!.id)
         .eq('status', 'active');
       loansQuery = scopeBranch(loansQuery);
       const loansRes = await loansQuery;
       if (loansRes.error) throw loansRes.error;
-      const loans = loansRes.data ?? [];
-      const loanOutstanding = loans.reduce((sum, l) => sum + Number(l.total_outstanding || 0), 0);
+      const loans = (loansRes.data ?? []) as {
+        total_outstanding: number | null;
+        currency: string | null;
+      }[];
+      const loanOutstanding = toBase(
+        loans.map((l) => ({
+          amount: Number(l.total_outstanding || 0),
+          currency: l.currency,
+        }))
+      );
 
       // --- Savings (count + total balance) ---
       let savingsQuery = supabase
         .from('savings_accounts')
-        .select('balance, branch_id')
+        .select('balance, currency, branch_id')
         .eq('tenant_id', tenant!.id)
         .eq('status', 'active');
       savingsQuery = scopeBranch(savingsQuery);
       const savingsRes = await savingsQuery;
       if (savingsRes.error) throw savingsRes.error;
-      const savings = savingsRes.data ?? [];
-      const savingsTotal = savings.reduce((sum, s) => sum + Number(s.balance || 0), 0);
+      const savings = (savingsRes.data ?? []) as {
+        balance: number | null;
+        currency: string | null;
+      }[];
+      const savingsTotal = toBase(
+        savings.map((s) => ({ amount: Number(s.balance || 0), currency: s.currency }))
+      );
 
       // --- Float (cash-on-hand across float accounts) ---
-      // IMPORTANT: do NOT filter by a single currency here. Float accounts are
-      // held per-currency (KES float, USD float, etc.), and hard-filtering to
-      // the tenant default currency silently hides every account in another
-      // currency — which is exactly why the Float Balance card previously read
-      // "$0 / 0 accounts" while the Float page showed KES 500,000. Instead we
-      // read every active float account and group by its own currency below.
+      // Do NOT filter by a single currency here. Float accounts are held
+      // per-currency (KES float, USD float, etc.), and hard-filtering to the
+      // tenant default currency silently hides every account in another
+      // currency. Read every active float account and convert below.
       //
       // Float accounts can be tenant-wide (branch_id IS NULL, e.g. head-office
       // reserves) as well as branch-scoped, so branch-restricted roles need an
-      // OR filter rather than a plain .eq — otherwise tenant-wide float would
+      // OR filter rather than a plain .eq -- otherwise tenant-wide float would
       // disappear from their view (same pattern the Float page uses).
       //
       // Cast: `float_accounts` isn't in the generated Supabase types yet, so
@@ -279,50 +367,34 @@ export function DashboardPage() {
       const floatRes = await floatQuery;
       if (floatRes.error) throw floatRes.error;
       const floatAccounts = (floatRes.data ?? []) as FloatRow[];
-
-      // Group float balances by their own currency.
-      const floatByCurrency = new Map<string, { total: number; count: number }>();
-      floatAccounts.forEach((f) => {
-        const code = f.currency || defaultCurrency;
-        const entry = floatByCurrency.get(code) ?? { total: 0, count: 0 };
-        entry.total += Number(f.balance || 0);
-        entry.count += 1;
-        floatByCurrency.set(code, entry);
-      });
-
-      // Pick the currency to headline on the single Float card: the base/default
-      // currency when it actually holds float, otherwise the currency with the
-      // largest balance. The account count still reflects ALL float accounts.
-      let floatCurrency = defaultCurrency;
-      if (floatByCurrency.size > 0) {
-        floatCurrency = floatByCurrency.has(defaultCurrency)
-          ? defaultCurrency
-          : Array.from(floatByCurrency.entries()).sort((a, b) => b[1].total - a[1].total)[0][0];
-      }
-      const floatTotal = floatByCurrency.get(floatCurrency)?.total ?? 0;
       const floatAccountCount = floatAccounts.length;
-      const floatCurrencyCount = floatByCurrency.size;
+      const floatTotal = toBase(
+        floatAccounts.map((f) => ({ amount: Number(f.balance || 0), currency: f.currency }))
+      );
 
       // --- Today's transactions (deposits/withdrawals totals) ---
       let todayTxQuery = supabase
         .from('transactions')
-        .select('transaction_type, amount, branch_id')
+        .select('transaction_type, amount, currency, branch_id')
         .eq('tenant_id', tenant!.id)
         .gte('created_at', todayIso)
         .in('status', ['completed', 'approved', 'processing']);
       todayTxQuery = scopeBranch(todayTxQuery);
       const todayTxRes = await todayTxQuery;
       if (todayTxRes.error) throw todayTxRes.error;
-      const todayTx = todayTxRes.data ?? [];
-      const depositsToday = todayTx
-        .filter((t) => t.transaction_type === 'deposit' || t.transaction_type === 'savings_deposit')
-        .reduce((sum, t) => sum + Number(t.amount || 0), 0);
-      const withdrawalsToday = todayTx
-        .filter(
-          (t) =>
-            t.transaction_type === 'withdrawal' || t.transaction_type === 'savings_withdrawal'
-        )
-        .reduce((sum, t) => sum + Number(t.amount || 0), 0);
+      const todayTx = (todayTxRes.data ?? []) as {
+        transaction_type: string;
+        amount: number | null;
+        currency: string | null;
+      }[];
+
+      const txRowsOfType = (types: string[]) =>
+        todayTx
+          .filter((t) => types.includes(t.transaction_type))
+          .map((t) => ({ amount: Number(t.amount || 0), currency: t.currency }));
+
+      const depositsToday = toBase(txRowsOfType(['deposit', 'savings_deposit']));
+      const withdrawalsToday = toBase(txRowsOfType(['withdrawal', 'savings_withdrawal']));
 
       // --- Recent transactions (with customer name) ---
       let recentQuery = supabase
@@ -351,11 +423,13 @@ export function DashboardPage() {
         if (custRes.error) throw custRes.error;
         (custRes.data ?? []).forEach((c) => nameMap.set(c.id, customerLabel(c)));
       }
+      // Individual rows keep their OWN currency. A single transaction is a
+      // real figure in a real currency and must never be restated.
       const recentTransactions: RecentTx[] = recentRows.map((r) => ({
         id: r.id,
         transaction_type: r.transaction_type,
         amount: Number(r.amount || 0),
-        currency: r.currency,
+        currency: r.currency || defaultCurrency,
         status: r.status,
         created_at: r.created_at,
         customerName: r.from_customer_id ? nameMap.get(r.from_customer_id) ?? 'Customer' : 'External',
@@ -422,11 +496,12 @@ export function DashboardPage() {
       // Only the queries this role's dashboard actually shows are run. A
       // teller never pays for the accountant's journal scan, and vice versa.
       let myTxCountToday = 0;
-      let myCashInToday = 0;
-      let myCashOutToday = 0;
+      let myCashInToday = emptyTotal(displayCurrency);
+      let myCashOutToday = emptyTotal(displayCurrency);
+      let myNetToday = emptyTotal(displayCurrency);
       let unpostedJournalCount = 0;
       let expensesAwaitingPayment = 0;
-      let expensesAwaitingPaymentTotal = 0;
+      let expensesAwaitingPaymentTotal = emptyTotal(displayCurrency);
       let kycPendingCount = 0;
       let frozenWalletCount = 0;
       let newCustomersThisMonth = 0;
@@ -438,7 +513,7 @@ export function DashboardPage() {
         // branch total: it is what they will be asked to reconcile at close.
         const myTxRes = await supabase
           .from('transactions')
-          .select('transaction_type, amount, status')
+          .select('transaction_type, amount, currency, status')
           .eq('tenant_id', tenant!.id)
           .eq('created_by', admin.id)
           .gte('created_at', todayIso);
@@ -447,6 +522,7 @@ export function DashboardPage() {
         const myTx = (myTxRes.data ?? []) as {
           transaction_type: string;
           amount: number | null;
+          currency: string | null;
           status: string;
         }[];
         // Cancelled and failed movements never touched the drawer, so they
@@ -455,17 +531,30 @@ export function DashboardPage() {
           (t) => t.status !== 'cancelled' && t.status !== 'failed' && t.status !== 'reversed'
         );
         myTxCountToday = settled.length;
-        for (const t of settled) {
-          const amt = Number(t.amount) || 0;
-          if (t.transaction_type === 'deposit' || t.transaction_type === 'float_allocation') {
-            myCashInToday += amt;
-          } else if (
-            t.transaction_type === 'withdrawal' ||
-            t.transaction_type === 'float_return'
-          ) {
-            myCashOutToday += amt;
-          }
-        }
+
+        const inRows = settled
+          .filter(
+            (t) => t.transaction_type === 'deposit' || t.transaction_type === 'float_allocation'
+          )
+          .map((t) => ({ amount: Number(t.amount || 0), currency: t.currency }));
+
+        const outRows = settled
+          .filter(
+            (t) => t.transaction_type === 'withdrawal' || t.transaction_type === 'float_return'
+          )
+          .map((t) => ({ amount: Number(t.amount || 0), currency: t.currency }));
+
+        myCashInToday = toBase(inRows);
+        myCashOutToday = toBase(outRows);
+
+        // Net is computed from signed rows bucketed together rather than by
+        // subtracting the two converted totals, so a currency that appears on
+        // only one side still nets correctly and the unconverted list covers
+        // both directions.
+        myNetToday = toBase([
+          ...inRows,
+          ...outRows.map((r) => ({ amount: -r.amount, currency: r.currency })),
+        ]);
       }
 
       if (role === 'accountant' || role === 'finance_officer') {
@@ -479,7 +568,7 @@ export function DashboardPage() {
           // accountant is expected to settle.
           supabase
             .from('expenses')
-            .select('amount')
+            .select('amount, currency')
             .eq('tenant_id', tenant!.id)
             .eq('status', 'approved'),
         ]);
@@ -487,9 +576,14 @@ export function DashboardPage() {
         if (unpaidExpRes.error) throw unpaidExpRes.error;
 
         unpostedJournalCount = journalRes.count ?? 0;
-        const unpaid = (unpaidExpRes.data ?? []) as { amount: number | null }[];
+        const unpaid = (unpaidExpRes.data ?? []) as {
+          amount: number | null;
+          currency: string | null;
+        }[];
         expensesAwaitingPayment = unpaid.length;
-        expensesAwaitingPaymentTotal = unpaid.reduce((sum, e) => sum + (Number(e.amount) || 0), 0);
+        expensesAwaitingPaymentTotal = toBase(
+          unpaid.map((e) => ({ amount: Number(e.amount || 0), currency: e.currency }))
+        );
       }
 
       if (role === 'customer_service') {
@@ -543,14 +637,13 @@ export function DashboardPage() {
         savingsCount: savings.length,
         savingsTotal,
         floatTotal,
-        floatCurrency,
-        floatCurrencyCount,
         floatAccountCount,
         recentTransactions,
         pendingApprovals,
         myTxCountToday,
         myCashInToday,
         myCashOutToday,
+        myNetToday,
         unpostedJournalCount,
         expensesAwaitingPayment,
         expensesAwaitingPaymentTotal,
@@ -562,31 +655,34 @@ export function DashboardPage() {
     } catch (err) {
       console.error('Dashboard load error:', err);
       setError(err instanceof Error ? err.message : 'Failed to load dashboard data');
-      setData(EMPTY);
+      setData(makeEmpty(displayCurrency));
       setExpenseSummary(EMPTY_EXPENSES);
     } finally {
       setLoading(false);
     }
   // admin is a dependency because the role-specific queries above branch on
   // admin.role and admin.id: without it, switching user would keep showing
-  // the previous role's figures.
-  }, [tenant, admin, branchId, seesAllBranches, defaultCurrency]);
+  // the previous role's figures. `rates` is a dependency so that reloading
+  // rates re-states every converted figure.
+  }, [tenant, admin, branchId, seesAllBranches, defaultCurrency, displayCurrency, rates, ratesLoading]);
 
   useEffect(() => {
-    loadDashboard();
+    void loadDashboard();
   }, [loadDashboard]);
 
-  // Float card change chip: account count, plus a hint when float spans
-  // multiple currencies (since the headline value shows only one of them).
-  const floatChange =
-    data.floatCurrencyCount > 1
-      ? `${data.floatAccountCount} account${data.floatAccountCount === 1 ? '' : 's'} · ${data.floatCurrencyCount} currencies`
-      : `${data.floatAccountCount} account${data.floatAccountCount === 1 ? '' : 's'}`;
+  // Refresh pulls fresh rates first, then restates the figures against them.
+  const handleRefresh = useCallback(async () => {
+    await reloadRates();
+    await loadDashboard();
+  }, [reloadRates, loadDashboard]);
 
-  // Each card below is assigned a unique color key so no two tiles share a
-  // color. There are exactly 8 stat cards and 8 color keys defined in
-  // `tileClasses` (5 base brand colors + 3 derived tints/shades), so every
-  // key here is used exactly once.
+  // Float card chip: currency/rate context when float spans more than the
+  // base currency, otherwise the plain account count.
+  const floatChange = rateSummary(
+    data.floatTotal,
+    `${data.floatAccountCount} account${data.floatAccountCount === 1 ? '' : 's'}`
+  );
+
   // ---------------------------------------------------------------------
   // Role-specific dashboards.
   //
@@ -596,8 +692,34 @@ export function DashboardPage() {
   // they will be asked for at close. So the roles with real day-to-day work
   // get cards built for that work, and everyone else gets the shared set
   // trimmed to what their navigation already permits.
+  //
+  // Every money value below reads `.total` (the base-currency figure) and
+  // carries `rateSummary(...)` in its chip plus a native breakdown tooltip,
+  // so a figure is never shown without the rate that produced it.
   // ---------------------------------------------------------------------
   const role = admin?.role ?? '';
+
+  // `fetchExpenseSummary` returns figures already summed in the institution
+  // base currency, so they are restated here rather than re-bucketed. If the
+  // base has no rate path to the display currency the original figure is kept
+  // and labelled, instead of showing a converted number that is really base.
+  const baseToDisplay = useCallback(
+    (amount: number): { value: number; converted: boolean } => {
+      if (displayCurrency === defaultCurrency.toUpperCase()) {
+        return { value: amount, converted: true };
+      }
+      const r = lookupRate(rates, defaultCurrency, displayCurrency);
+      if (r === null || !Number.isFinite(r) || r <= 0) {
+        return { value: amount, converted: false };
+      }
+      return { value: amount * r, converted: true };
+    },
+    [rates, defaultCurrency, displayCurrency]
+  );
+
+  const expensesMonth = baseToDisplay(expenseSummary.totalThisMonth);
+
+  const netIsInflow = data.myNetToday.total >= 0;
 
   const tellerStats: StatCard[] = [
     {
@@ -610,35 +732,39 @@ export function DashboardPage() {
     },
     {
       label: 'Cash In Today',
-      value: formatMoney(data.myCashInToday, defaultCurrency),
-      change: 'deposits and top-ups',
-      changeType: 'positive',
+      value: formatMoney(data.myCashInToday.total, displayCurrency),
+      change: rateSummary(data.myCashInToday, 'deposits and top-ups'),
+      changeType: data.myCashInToday.complete ? 'positive' : 'negative',
       icon: <ArrowDownRight className="w-6 h-6" />,
       color: 'teal',
+      tooltip: breakdownLine(data.myCashInToday),
     },
     {
       label: 'Cash Out Today',
-      value: formatMoney(data.myCashOutToday, defaultCurrency),
-      change: 'withdrawals and payouts',
-      changeType: 'neutral',
+      value: formatMoney(data.myCashOutToday.total, displayCurrency),
+      change: rateSummary(data.myCashOutToday, 'withdrawals and payouts'),
+      changeType: data.myCashOutToday.complete ? 'neutral' : 'negative',
       icon: <ArrowUpRight className="w-6 h-6" />,
       color: 'orange',
+      tooltip: breakdownLine(data.myCashOutToday),
     },
     {
       label: 'Net Position',
-      value: formatMoney(data.myCashInToday - data.myCashOutToday, defaultCurrency),
-      change: data.myCashInToday >= data.myCashOutToday ? 'net inflow' : 'net outflow',
-      changeType: data.myCashInToday >= data.myCashOutToday ? 'positive' : 'negative',
+      value: formatMoney(data.myNetToday.total, displayCurrency),
+      change: rateSummary(data.myNetToday, netIsInflow ? 'net inflow' : 'net outflow'),
+      changeType: !data.myNetToday.complete ? 'negative' : netIsInflow ? 'positive' : 'negative',
       icon: <Wallet className="w-6 h-6" />,
       color: 'mint',
+      tooltip: breakdownLine(data.myNetToday),
     },
     {
       label: 'Float Balance',
-      value: `${currencyFlag(data.floatCurrency)} ${formatMoney(data.floatTotal, data.floatCurrency)}`,
+      value: formatMoney(data.floatTotal.total, displayCurrency),
       change: floatChange,
-      changeType: 'neutral',
+      changeType: data.floatTotal.complete ? 'neutral' : 'negative',
       icon: <Landmark className="w-6 h-6" />,
       color: 'deepTeal',
+      tooltip: breakdownLine(data.floatTotal),
     },
     {
       label: 'Total Customers',
@@ -662,14 +788,15 @@ export function DashboardPage() {
     {
       label: 'Expenses to Pay',
       value: data.expensesAwaitingPayment.toLocaleString(),
-      change: `${formatMoney(data.expensesAwaitingPaymentTotal, defaultCurrency)} approved`,
+      change: `${formatMoney(data.expensesAwaitingPaymentTotal.total, displayCurrency)} approved`,
       changeType: data.expensesAwaitingPayment > 0 ? 'negative' : 'neutral',
       icon: <Receipt className="w-6 h-6" />,
       color: 'orange',
+      tooltip: breakdownLine(data.expensesAwaitingPaymentTotal),
     },
     {
       label: 'Expenses (Month)',
-      value: formatMoney(expenseSummary.totalThisMonth, defaultCurrency),
+      value: formatMoney(expensesMonth.value, expensesMonth.converted ? displayCurrency : defaultCurrency),
       change:
         expenseSummary.pendingCount > 0 ? `${expenseSummary.pendingCount} pending` : 'all clear',
       changeType: expenseSummary.pendingCount > 0 ? 'negative' : 'neutral',
@@ -678,27 +805,30 @@ export function DashboardPage() {
     },
     {
       label: 'Deposits Today',
-      value: formatMoney(data.depositsToday, defaultCurrency),
-      change: 'today',
-      changeType: 'positive',
+      value: formatMoney(data.depositsToday.total, displayCurrency),
+      change: rateSummary(data.depositsToday, 'today'),
+      changeType: data.depositsToday.complete ? 'positive' : 'negative',
       icon: <ArrowDownRight className="w-6 h-6" />,
       color: 'teal',
+      tooltip: breakdownLine(data.depositsToday),
     },
     {
       label: 'Withdrawals Today',
-      value: formatMoney(data.withdrawalsToday, defaultCurrency),
-      change: 'today',
-      changeType: 'neutral',
+      value: formatMoney(data.withdrawalsToday.total, displayCurrency),
+      change: rateSummary(data.withdrawalsToday, 'today'),
+      changeType: data.withdrawalsToday.complete ? 'neutral' : 'negative',
       icon: <ArrowUpRight className="w-6 h-6" />,
       color: 'mint',
+      tooltip: breakdownLine(data.withdrawalsToday),
     },
     {
       label: 'Float Balance',
-      value: `${currencyFlag(data.floatCurrency)} ${formatMoney(data.floatTotal, data.floatCurrency)}`,
+      value: formatMoney(data.floatTotal.total, displayCurrency),
       change: floatChange,
-      changeType: 'neutral',
+      changeType: data.floatTotal.complete ? 'neutral' : 'negative',
       icon: <Landmark className="w-6 h-6" />,
       color: 'deepTeal',
+      tooltip: breakdownLine(data.floatTotal),
     },
   ];
 
@@ -738,18 +868,20 @@ export function DashboardPage() {
     {
       label: 'Wallets',
       value: data.walletCount.toLocaleString(),
-      change: `${formatMoney(data.walletTotal, defaultCurrency)} total`,
-      changeType: 'neutral',
+      change: `${formatMoney(data.walletTotal.total, displayCurrency)} total`,
+      changeType: data.walletTotal.complete ? 'neutral' : 'negative',
       icon: <Wallet className="w-6 h-6" />,
       color: 'mint',
+      tooltip: breakdownLine(data.walletTotal),
     },
     {
       label: 'Savings Accounts',
       value: data.savingsCount.toLocaleString(),
-      change: `${formatMoney(data.savingsTotal, defaultCurrency)} balance`,
-      changeType: 'neutral',
+      change: `${formatMoney(data.savingsTotal.total, displayCurrency)} balance`,
+      changeType: data.savingsTotal.complete ? 'neutral' : 'negative',
       icon: <PiggyBank className="w-6 h-6" />,
       color: 'softOrange',
+      tooltip: breakdownLine(data.savingsTotal),
     },
   ];
 
@@ -764,55 +896,61 @@ export function DashboardPage() {
     },
     {
       label: 'Float Balance',
-      value: `${currencyFlag(data.floatCurrency)} ${formatMoney(data.floatTotal, data.floatCurrency)}`,
+      value: formatMoney(data.floatTotal.total, displayCurrency),
       change: floatChange,
-      changeType: 'neutral',
+      changeType: data.floatTotal.complete ? 'neutral' : 'negative',
       icon: <Landmark className="w-6 h-6" />,
       color: 'orange', // #ee7b22
+      tooltip: breakdownLine(data.floatTotal),
     },
     {
       label: 'Deposits Today',
-      value: formatMoney(data.depositsToday, defaultCurrency),
-      change: 'today',
-      changeType: 'positive',
+      value: formatMoney(data.depositsToday.total, displayCurrency),
+      change: rateSummary(data.depositsToday, 'today'),
+      changeType: data.depositsToday.complete ? 'positive' : 'negative',
       icon: <ArrowDownRight className="w-6 h-6" />,
       color: 'teal', // #1ebcb2
+      tooltip: breakdownLine(data.depositsToday),
     },
     {
       label: 'Withdrawals Today',
-      value: formatMoney(data.withdrawalsToday, defaultCurrency),
-      change: 'today',
-      changeType: 'neutral',
+      value: formatMoney(data.withdrawalsToday.total, displayCurrency),
+      change: rateSummary(data.withdrawalsToday, 'today'),
+      changeType: data.withdrawalsToday.complete ? 'neutral' : 'negative',
       icon: <ArrowUpRight className="w-6 h-6" />,
       color: 'mint', // #8dd3cd
+      tooltip: breakdownLine(data.withdrawalsToday),
     },
     {
       label: 'Active Loans',
       value: data.activeLoanCount.toLocaleString(),
-      change: `${formatMoney(data.loanOutstanding, defaultCurrency)} outstanding`,
-      changeType: 'neutral',
+      change: `${formatMoney(data.loanOutstanding.total, displayCurrency)} outstanding`,
+      changeType: data.loanOutstanding.complete ? 'neutral' : 'negative',
       icon: <Banknote className="w-6 h-6" />,
       color: 'deepTeal', // #158f87 (derived from #1ebcb2)
+      tooltip: breakdownLine(data.loanOutstanding),
     },
     {
       label: 'Savings Accounts',
       value: data.savingsCount.toLocaleString(),
-      change: `${formatMoney(data.savingsTotal, defaultCurrency)} balance`,
-      changeType: 'neutral',
+      change: `${formatMoney(data.savingsTotal.total, displayCurrency)} balance`,
+      changeType: data.savingsTotal.complete ? 'neutral' : 'negative',
       icon: <PiggyBank className="w-6 h-6" />,
       color: 'softOrange', // #f5a361 (derived from #ee7b22)
+      tooltip: breakdownLine(data.savingsTotal),
     },
     {
       label: 'Wallets',
       value: data.walletCount.toLocaleString(),
-      change: `${formatMoney(data.walletTotal, defaultCurrency)} total`,
-      changeType: 'neutral',
+      change: `${formatMoney(data.walletTotal.total, displayCurrency)} total`,
+      changeType: data.walletTotal.complete ? 'neutral' : 'negative',
       icon: <Wallet className="w-6 h-6" />,
       color: 'cloud', // #dcdfe0
+      tooltip: breakdownLine(data.walletTotal),
     },
     {
       label: 'Expenses (Month)',
-      value: formatMoney(expenseSummary.totalThisMonth, defaultCurrency),
+      value: formatMoney(expensesMonth.value, expensesMonth.converted ? displayCurrency : defaultCurrency),
       change:
         expenseSummary.pendingCount > 0
           ? `${expenseSummary.pendingCount} pending`
@@ -844,7 +982,26 @@ export function DashboardPage() {
       ? sharedStats.filter((c) => SHARED_CARDS_BY_ROLE[role].includes(c.label))
       : sharedStats;
 
-  // Every card gets its own distinct color — no repeats. Your 5 given hex
+  // Currencies present anywhere on this dashboard that have no rate path to
+  // the base currency. Their balances are excluded from the totals above, so
+  // this has to be stated rather than left as a silent shortfall.
+  const missingRateCurrencies = Array.from(
+    new Set(
+      [
+        data.floatTotal,
+        data.walletTotal,
+        data.savingsTotal,
+        data.loanOutstanding,
+        data.depositsToday,
+        data.withdrawalsToday,
+        data.myCashInToday,
+        data.myCashOutToday,
+        data.expensesAwaitingPaymentTotal,
+      ].flatMap((t) => t.unconverted)
+    )
+  );
+
+  // Every card gets its own distinct color -- no repeats. Your 5 given hex
   // values are used as-is (purple, orange, teal, mint, and the light
   // #dcdfe0 as a neutral accent), plus 3 tints/shades pulled from the same
   // brand family (deep teal, soft orange, deep plum) so the remaining
@@ -884,7 +1041,7 @@ export function DashboardPage() {
         chipBg: 'bg-[#8dd3cd]/25',
         chipText: 'text-[#158f87]',
       },
-      // Your neutral #dcdfe0 as its own accent — dark purple text/icon for
+      // Your neutral #dcdfe0 as its own accent -- dark purple text/icon for
       // contrast since the base tone itself is very light.
       cloud: {
         accent: 'bg-[#dcdfe0]',
@@ -932,7 +1089,7 @@ export function DashboardPage() {
             </h1>
             <p className="text-white/80 mt-1">
               {tenant?.name}
-              {branch?.name ? ` — ${branch.name}` : ''}
+              {branch?.name ? ` - ${branch.name}` : ''}
               {seesAllBranches && branches.length > 1 ? ' (all branches)' : ''}
             </p>
           </div>
@@ -954,7 +1111,7 @@ export function DashboardPage() {
             <p className="text-sm text-slate-600">{error}</p>
           </div>
           <button
-            onClick={loadDashboard}
+            onClick={handleRefresh}
             className="px-4 py-2 bg-[#ee7b22] hover:bg-[#c46040] text-white text-sm font-medium rounded-lg transition-colors flex items-center gap-2"
           >
             <RefreshCw className="w-4 h-4" />
@@ -984,9 +1141,96 @@ export function DashboardPage() {
         </div>
       )}
 
-      {/* Stats — white cards, colored accent per card, bold figures */}
+      {/* Rate basis banner. Every converted figure below is stated in the
+          base currency, so the rate source and its as-of time belong on the
+          page, not buried in a tooltip. */}
+      {ratesError ? (
+        <div className="bg-[#c46040]/10 border border-[#c46040]/30 rounded-xl px-4 py-3 flex flex-wrap items-center gap-x-3 gap-y-2 text-sm">
+          <AlertCircle className="w-4 h-4 text-[#c46040] flex-shrink-0" />
+          <span className="text-[#c46040] font-medium">
+            Exchange rates unavailable
+          </span>
+          <span className="text-slate-600">
+            Totals show {displayCurrency} balances only. Other currencies are excluded.
+          </span>
+          <button
+            onClick={() => void reloadRates()}
+            className="ml-auto inline-flex items-center gap-1.5 text-[#641f60] font-medium hover:underline"
+          >
+            <RefreshCw className="w-3.5 h-3.5" />
+            Retry
+          </button>
+        </div>
+      ) : (
+        <div className="bg-white border border-[#dcdfe0] rounded-xl px-4 py-3 flex flex-wrap items-center gap-x-3 gap-y-2 text-xs">
+          <TrendingUp className="w-4 h-4 text-[#1ebcb2] flex-shrink-0" />
+          <span className="text-slate-600">Totals shown in</span>
+
+          {/* Display-currency switcher. Only currencies with a rate path from
+              the institution base are offered, so a selection can never
+              produce a dashboard of excluded figures. */}
+          <label className="sr-only" htmlFor="dashboard-display-currency">
+            Display currency
+          </label>
+          <select
+            id="dashboard-display-currency"
+            value={displayCurrency}
+            onChange={(e) => setDisplayCurrency(e.target.value)}
+            disabled={currencyOptions.length <= 1}
+            className="px-2 py-1 border border-[#dcdfe0] rounded-md bg-white text-[#641f60] font-semibold text-xs focus:outline-none focus:ring-2 focus:ring-[#1ebcb2] disabled:opacity-60 disabled:cursor-not-allowed"
+            title={
+              currencyOptions.length <= 1
+                ? 'Add exchange rate pairs in Forex Trading to view other currencies'
+                : 'Restate every figure in this currency'
+            }
+          >
+            {currencyOptions.map((c) => (
+              <option key={c} value={c}>
+                {c}
+              </option>
+            ))}
+          </select>
+
+          <span className="text-slate-600">
+            at active Forex Trading rates
+            {displayCurrency !== defaultCurrency.toUpperCase() && (
+              <span className="text-slate-400"> (base {defaultCurrency})</span>
+            )}
+          </span>
+          <span className="text-slate-300">|</span>
+          <span className="text-slate-500">as of {formatAsOf(ratesAsOf)}</span>
+
+          {Object.keys(rates).length === 0 && (
+            <>
+              <span className="text-slate-300">|</span>
+              <span className="text-[#ee7b22] font-medium">
+                no active currency pairs configured
+              </span>
+            </>
+          )}
+
+          {missingRateCurrencies.length > 0 && (
+            <>
+              <span className="text-slate-300">|</span>
+              <span className="text-[#c46040] font-medium">
+                {missingRateCurrencies.join(', ')} excluded, no rate to {displayCurrency}
+              </span>
+            </>
+          )}
+
+          <button
+            onClick={handleRefresh}
+            className="ml-auto inline-flex items-center gap-1.5 text-[#1ebcb2] hover:text-[#641f60] font-medium transition-colors"
+          >
+            <RefreshCw className="w-3.5 h-3.5" />
+            Refresh rates
+          </button>
+        </div>
+      )}
+
+      {/* Stats - white cards, colored accent per card, bold figures */}
       <div className="grid sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-5">
-        {loading
+        {loading || ratesLoading
           ? Array.from({ length: 8 }).map((_, idx) => (
               <div key={idx} className="rounded-2xl p-6 bg-white border border-[#dcdfe0] animate-pulse">
                 <div className="w-11 h-11 rounded-xl bg-slate-200 mb-6" />
@@ -1000,6 +1244,7 @@ export function DashboardPage() {
               return (
                 <div
                   key={idx}
+                  title={stat.tooltip}
                   onClick={() => {
                     if (stat.label === 'Expenses (Month)') {
                       window.dispatchEvent(new CustomEvent('navigate', { detail: 'expenses' }));
@@ -1014,12 +1259,12 @@ export function DashboardPage() {
                   {/* Colored accent bar identifies the card without tinting the whole background */}
                   <div className={`absolute left-0 top-0 h-full w-1.5 ${t.accent}`} />
 
-                  <div className="flex items-start justify-between mb-6">
-                    <div className={`w-11 h-11 rounded-xl ${t.iconBg} flex items-center justify-center`}>
+                  <div className="flex items-start justify-between gap-2 mb-6">
+                    <div className={`w-11 h-11 rounded-xl ${t.iconBg} flex items-center justify-center flex-shrink-0`}>
                       <span className={t.iconText}>{stat.icon}</span>
                     </div>
                     <span
-                      className={`text-[11px] font-semibold px-2.5 py-1 rounded-full ${
+                      className={`text-[11px] font-semibold px-2.5 py-1 rounded-full text-right leading-tight ${
                         stat.changeType === 'negative'
                           ? 'bg-[#c46040]/10 text-[#c46040]'
                           : `${t.chipBg} ${t.chipText}`
@@ -1038,13 +1283,15 @@ export function DashboardPage() {
             })}
       </div>
 
-
       {/* Recent + approvals */}
       <div className="grid lg:grid-cols-3 gap-6">
         {/* Recent transactions */}
         <div className="lg:col-span-2 bg-white rounded-xl border border-slate-200 overflow-hidden">
           <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between">
-            <h2 className="font-semibold text-slate-900">Recent Transactions</h2>
+            <div>
+              <h2 className="font-semibold text-slate-900">Recent Transactions</h2>
+              <p className="text-xs text-slate-500 mt-0.5">Shown in original currency</p>
+            </div>
             <button
               onClick={() => window.dispatchEvent(new CustomEvent('navigate', { detail: 'transactions' }))}
               className="text-sm text-[#1ebcb2] hover:text-[#641f60] font-medium transition-colors"
@@ -1120,13 +1367,16 @@ export function DashboardPage() {
           )}
         </div>
 
-        {/* Pending approvals — only for roles that can actually action them.
+        {/* Pending approvals - only for roles that can actually action them.
             Showing a queue to someone whose navigation has no Approvals page
             would just be a list they can never clear. */}
         {APPROVAL_ROLES.has(role) && (
         <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
           <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between">
-            <h2 className="font-semibold text-slate-900">Pending Approvals</h2>
+            <div>
+              <h2 className="font-semibold text-slate-900">Pending Approvals</h2>
+              <p className="text-xs text-slate-500 mt-0.5">Shown in original currency</p>
+            </div>
             {!loading && (
               <span className="px-2.5 py-1 bg-[#ee7b22]/10 text-[#ee7b22] rounded-full text-xs font-medium">
                 {data.pendingApprovals.length} pending
@@ -1173,7 +1423,7 @@ export function DashboardPage() {
         )}
       </div>
 
-      {/* Branch overview — head office and managers only. A teller compares
+      {/* Branch overview - head office and managers only. A teller compares
           nothing across branches; they work one till. */}
       {branches.length > 1 && BRANCH_OVERVIEW_ROLES.has(role) && (
         <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">

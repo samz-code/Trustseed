@@ -3,6 +3,7 @@ import { useAuth } from '../contexts/AuthContext';
 import { supabase } from '../lib/supabase';
 import type { InsertTables, Tables } from '../lib/supabase';
 import type { Wallet, Customer, FloatAccount } from '../types';
+import type { PostgrestError } from '@supabase/supabase-js';
 import { useCurrency } from '../lib/currency';
 import {
   Plus,
@@ -493,6 +494,87 @@ function ledgerStatusBadge(status: string) {
   );
 }
 
+// ============================================================================
+// Typed RPC layer
+//
+// The generated Supabase types in lib/supabase.ts don't declare these
+// Postgres functions (wallet_deposit / wallet_withdraw / wallet_transfer /
+// wallet_set_status), so `supabase.rpc(...)` can't infer argument or return
+// types for them. Rather than sprinkling `as never` at every call site (which
+// silently defeats type-checking on the *arguments* we send — e.g. a typo'd
+// field name would compile happily), the cast is isolated to one small
+// helper below. Every call site gets full compile-time checking against the
+// Args/Return interfaces declared here. Once these functions are added to
+// Database['public']['Functions'] (via `supabase gen types`), `callRpc` and
+// its one internal cast can be deleted and call sites can call
+// `supabase.rpc` directly.
+// ============================================================================
+
+interface RpcErrorLike {
+  message: string;
+  code?: string;
+}
+
+function callRpc<TArgs extends Record<string, unknown>, TReturn>(
+  fn: string,
+  args: TArgs
+): Promise<{ data: TReturn | null; error: PostgrestError | null }> {
+  return supabase.rpc(fn as never, args as never) as unknown as Promise<{
+    data: TReturn | null;
+    error: PostgrestError | null;
+  }>;
+}
+
+interface WalletMoneyOpArgs {
+  p_wallet_id: string;
+  p_amount: number;
+  p_float_account_id: string | null;
+  p_payment_source: string;
+  p_notes: string | null;
+}
+
+interface WalletTransferArgs {
+  p_from_wallet_id: string;
+  p_to_wallet_id: string;
+  p_amount: number;
+  p_fee: number;
+  p_notes: string | null;
+}
+
+interface WalletSetStatusArgs {
+  p_wallet_id: string;
+  p_status: 'active' | 'frozen' | 'closed';
+}
+
+interface WalletMoneyOpResult {
+  transaction_id: string;
+  new_balance: number;
+}
+
+const walletDeposit = (args: WalletMoneyOpArgs) =>
+  callRpc<WalletMoneyOpArgs, WalletMoneyOpResult>('wallet_deposit', args);
+
+const walletWithdraw = (args: WalletMoneyOpArgs) =>
+  callRpc<WalletMoneyOpArgs, WalletMoneyOpResult>('wallet_withdraw', args);
+
+const walletTransfer = (args: WalletTransferArgs) =>
+  callRpc<WalletTransferArgs, WalletMoneyOpResult>('wallet_transfer', args);
+
+const walletSetStatus = (args: WalletSetStatusArgs) =>
+  callRpc<WalletSetStatusArgs, Tables<'wallets'>>('wallet_set_status', args);
+
+// Turns a Postgres/PostgREST error into a message safe to show an operator.
+// The database's own exception text ("Insufficient funds. Available is 500,
+// requested 800.") is already user-facing and shown verbatim; only the
+// "function isn't installed" case (PGRST202) needs translating, since that
+// code means nothing to a teller.
+function describeRpcError(err: RpcErrorLike, missingFnHint: string): string {
+  if (err.code === 'PGRST202') {
+    return `${missingFnHint} is not installed on this database. Check your migrations.`;
+  }
+  return err.message || 'Something went wrong. Please try again.';
+}
+
 export function WalletsPage() {
   const { tenant, branch } = useAuth();
   const { format, enabledCurrencies, defaultCurrency } = useCurrency();
@@ -515,15 +597,13 @@ export function WalletsPage() {
   const [statusUpdating, setStatusUpdating] = useState(false);
   const [statusError, setStatusError] = useState<string | null>(null);
 
-  // Edit + delete — both were missing entirely before (only Create + View
-  // existed).
+  // Edit + delete
   const [editingWalletId, setEditingWalletId] = useState<string | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
 
-  // Money movement. Before this, a wallet's balance could never change from
-  // the UI at all: only create, status and delete existed.
+  // Money movement.
   //
   // Every one of these calls a Postgres function that locks the row, does the
   // arithmetic and writes the ledger entry in ONE transaction. Doing it in
@@ -604,10 +684,15 @@ export function WalletsPage() {
 
   // Real-time sync: any change to this tenant's wallets (a deposit or
   // withdrawal made from Transactions, another tab, another cashier) reloads
-  // the list automatically. If a wallet's detail panel happens to be open,
-  // its activity ledger is refreshed too. Requires Realtime enabled for the
-  // `wallets` table in Supabase (Database → Replication, or
+  // the list automatically. Requires Realtime enabled for the `wallets`
+  // table in Supabase (Database → Replication, or
   // `alter publication supabase_realtime add table wallets;`).
+  //
+  // loadData is included in the dependency array (rather than suppressed
+  // with eslint-disable) so the subscription always calls the version of
+  // loadData that closes over the current tenant — a stale tenant reference
+  // here would silently reload the wrong tenant's data after switching
+  // institutions.
   useEffect(() => {
     if (!tenant) return;
     const channel = supabase
@@ -623,8 +708,7 @@ export function WalletsPage() {
     return () => {
       supabase.removeChannel(channel);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tenant]);
+  }, [tenant, loadData]);
 
   // Loads the transactions that actually moved money into or out of this
   // specific wallet (via from_wallet_id / to_wallet_id), so a wallet isn't
@@ -697,29 +781,28 @@ export function WalletsPage() {
       setLedgerFloatLabels({});
       setLedgerError(null);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [detailWallet?.id]);
+  }, [detailWallet?.id, loadWalletLedger]);
 
   // Keeps the open wallet's activity ledger live too — a new transaction
   // landing against this wallet while its detail panel is open shows up
   // immediately instead of only after closing and reopening it.
   useEffect(() => {
     if (!tenant || !detailWallet) return;
+    const walletId = detailWallet.id;
     const channel = supabase
-      .channel(`wallet_ledger_${detailWallet.id}`)
+      .channel(`wallet_ledger_${walletId}`)
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'transactions', filter: `tenant_id=eq.${tenant.id}` },
         () => {
-          loadWalletLedger(detailWallet.id);
+          loadWalletLedger(walletId);
         }
       )
       .subscribe();
     return () => {
       supabase.removeChannel(channel);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tenant, detailWallet?.id]);
+  }, [tenant, detailWallet?.id, loadWalletLedger]);
 
   const inScope = useCallback(
     (branchId: string | null | undefined) => {
@@ -867,20 +950,30 @@ export function WalletsPage() {
       return;
     }
 
+    // Capture the target id locally: editingWalletId is component state and
+    // could theoretically change if the user re-opens the form for a
+    // different wallet while this submit is still in flight. Reading from
+    // the local constant rather than the state variable for the rest of
+    // this handler means the request always targets the wallet that was
+    // actually being edited when Save was clicked.
+    const targetWalletId = editingWalletId;
+    const submittedForm = formData;
+
     setSubmitting(true);
     try {
-      if (editingWalletId) {
+      if (targetWalletId) {
         // Editing never touches balance, customer, or scope — only the
         // account's own configuration. Balance only moves through a tracked
         // transaction; customer and scope are fixed at creation to avoid
         // silently re-pointing an existing account's history.
+        const updatePayload: Partial<Pick<Wallet, 'wallet_type' | 'currency'>> = {
+          wallet_type: submittedForm.wallet_type,
+          currency: submittedForm.currency,
+        };
         const { error: updateError } = await supabase
           .from('wallets')
-          .update({
-            wallet_type: formData.wallet_type,
-            currency: formData.currency,
-          } as never)
-          .eq('id', editingWalletId)
+          .update(updatePayload)
+          .eq('id', targetWalletId)
           .eq('tenant_id', tenant.id);
         if (updateError) throw updateError;
       } else {
@@ -889,10 +982,10 @@ export function WalletsPage() {
         // not a raw wallet insert, so the ledger stays the source of truth.
         const insert: InsertTables<'wallets'> = {
           tenant_id: tenant.id,
-          branch_id: formData.scope === 'branch' ? branch?.id ?? null : null,
-          customer_id: formData.customer_id,
-          wallet_type: formData.wallet_type,
-          currency: formData.currency,
+          branch_id: submittedForm.scope === 'branch' ? branch?.id ?? null : null,
+          customer_id: submittedForm.customer_id,
+          wallet_type: submittedForm.wallet_type,
+          currency: submittedForm.currency,
           status: 'active',
         };
         const { error: insertError } = await supabase.from('wallets').insert(insert);
@@ -900,7 +993,12 @@ export function WalletsPage() {
       }
 
       await loadData();
-      closeForm();
+      // Only close if we're still editing the same wallet we started with —
+      // guards against the modal disappearing out from under the user if
+      // they somehow triggered a second save while this one was pending.
+      if (editingWalletId === targetWalletId) {
+        closeForm();
+      }
     } catch (err) {
       console.error('Error saving wallet:', err);
       setError(err instanceof Error ? err.message : 'Failed to save wallet');
@@ -958,34 +1056,49 @@ export function WalletsPage() {
     e.preventDefault();
     setMoneyError(null);
 
-    if (!tenant || !moneyWallet || !moneyOp) {
+    // Capture everything this submission needs into local constants up
+    // front. moneyWallet/moneyOp are component state; if the user manages to
+    // dismiss or change the modal while an earlier submit is still awaiting
+    // the network, reading from state again later in this function could
+    // silently apply the wrong wallet/op to a stale request. Local consts
+    // make this handler self-contained regardless of what state does next.
+    const wallet = moneyWallet;
+    const op = moneyOp;
+    const amountInput = moneyAmount;
+    const source = moneySource;
+    const notes = moneyNotes;
+    const floatId = moneyFloatId || null;
+    const toWalletId = moneyToWalletId;
+    const feeInput = moneyFee;
+
+    if (!tenant || !wallet || !op) {
       setMoneyError('Missing context. Please sign in again.');
       return;
     }
 
-    const amount = parseFloat(moneyAmount);
-    if (!moneyAmount || Number.isNaN(amount) || amount <= 0) {
+    const amount = parseFloat(amountInput);
+    if (!amountInput || Number.isNaN(amount) || amount <= 0) {
       setMoneyError('Enter a valid amount.');
       return;
     }
 
     // Checked here for an immediate, specific message. The database enforces
     // the same rules, so a stale balance on screen still cannot get through.
-    if (moneyOp === 'withdraw' && amount > Number(moneyWallet.available_balance || 0)) {
+    if (op === 'withdraw' && amount > Number(wallet.available_balance || 0)) {
       setMoneyError(
-        `Only ${format(Number(moneyWallet.available_balance || 0), moneyWallet.currency)} is available. Held funds cannot be withdrawn.`
+        `Only ${format(Number(wallet.available_balance || 0), wallet.currency)} is available. Held funds cannot be withdrawn.`
       );
       return;
     }
-    if (moneyOp === 'transfer') {
-      if (!moneyToWalletId) {
+    if (op === 'transfer') {
+      if (!toWalletId) {
         setMoneyError('Choose a destination wallet.');
         return;
       }
-      const fee = parseFloat(moneyFee) || 0;
-      if (amount + fee > Number(moneyWallet.available_balance || 0)) {
+      const fee = parseFloat(feeInput) || 0;
+      if (amount + fee > Number(wallet.available_balance || 0)) {
         setMoneyError(
-          `Insufficient funds. ${format(amount + fee, moneyWallet.currency)} is needed including the fee, but only ${format(Number(moneyWallet.available_balance || 0), moneyWallet.currency)} is available.`
+          `Insufficient funds. ${format(amount + fee, wallet.currency)} is needed including the fee, but only ${format(Number(wallet.available_balance || 0), wallet.currency)} is available.`
         );
         return;
       }
@@ -993,61 +1106,76 @@ export function WalletsPage() {
 
     setMoneySubmitting(true);
     try {
-      let rpcError = null;
+      let rpcError: PostgrestError | null = null;
+      let missingFnHint = '';
 
-      if (moneyOp === 'deposit') {
-        const { error } = await supabase.rpc('wallet_deposit', {
-          p_wallet_id: moneyWallet.id,
+      if (op === 'deposit') {
+        missingFnHint = 'wallet_deposit';
+        const { error } = await walletDeposit({
+          p_wallet_id: wallet.id,
           p_amount: amount,
           // Optional: when cash comes over the counter, the till rises in the
           // same transaction so the drawer and the wallet cannot disagree.
-          p_float_account_id: moneyFloatId || null,
-          p_payment_source: moneySource,
-          p_notes: moneyNotes.trim() || null,
-        } as never);
+          p_float_account_id: floatId,
+          p_payment_source: source,
+          p_notes: notes.trim() || null,
+        });
         rpcError = error;
-      } else if (moneyOp === 'withdraw') {
-        const { error } = await supabase.rpc('wallet_withdraw', {
-          p_wallet_id: moneyWallet.id,
+      } else if (op === 'withdraw') {
+        missingFnHint = 'wallet_withdraw';
+        const { error } = await walletWithdraw({
+          p_wallet_id: wallet.id,
           p_amount: amount,
-          p_float_account_id: moneyFloatId || null,
-          p_payment_source: moneySource,
-          p_notes: moneyNotes.trim() || null,
-        } as never);
+          p_float_account_id: floatId,
+          p_payment_source: source,
+          p_notes: notes.trim() || null,
+        });
         rpcError = error;
       } else {
-        const { error } = await supabase.rpc('wallet_transfer', {
-          p_from_wallet_id: moneyWallet.id,
-          p_to_wallet_id: moneyToWalletId,
+        missingFnHint = 'wallet_transfer';
+        const { error } = await walletTransfer({
+          p_from_wallet_id: wallet.id,
+          p_to_wallet_id: toWalletId,
           p_amount: amount,
-          p_fee: parseFloat(moneyFee) || 0,
-          p_notes: moneyNotes.trim() || null,
-        } as never);
+          p_fee: parseFloat(feeInput) || 0,
+          p_notes: notes.trim() || null,
+        });
         rpcError = error;
       }
 
-      // Database guards ("Insufficient funds. Available is 500, requested
-      // 800.") are shown verbatim: they say exactly what went wrong.
-      if (rpcError) throw rpcError;
-
-      await loadData();
-      if (detailWallet && detailWallet.id === moneyWallet.id) {
-        await loadWalletLedger(moneyWallet.id);
+      if (rpcError) {
+        throw new Error(describeRpcError(rpcError, missingFnHint));
       }
-      closeMoneyOp();
+
+      // Refresh before touching any UI state tied to this operation, so the
+      // wallet cards/detail panel/ledger reflect the real post-transaction
+      // balances rather than what was on screen when Confirm was clicked.
+      await loadData();
+      if (detailWallet && detailWallet.id === wallet.id) {
+        await loadWalletLedger(wallet.id);
+      }
+
+      // Only close the modal if it's still showing the operation we just
+      // completed — if the user already closed/changed it, don't clobber
+      // whatever they've moved on to.
+      if (moneyOp === op && moneyWallet?.id === wallet.id) {
+        closeMoneyOp();
+      }
     } catch (err) {
-      console.error(`Error on wallet ${moneyOp}:`, err);
-      setMoneyError(err instanceof Error ? err.message : `Failed to ${moneyOp}`);
+      console.error(`Error on wallet ${op}:`, err);
+      setMoneyError(err instanceof Error ? err.message : `Failed to ${op}`);
     } finally {
       setMoneySubmitting(false);
     }
   };
 
-  // Freeze / reactivate / close — the wallet's `status` column already
-// Freeze / reactivate / close. Routed through wallet_set_status rather than
-  // a direct .update(), matching how every other wallet mutation on this page
-  // works. The function authorises the caller itself, so it does not depend on
-  // the wallets_update RLS policy.
+  // Freeze / reactivate / close. Routed through wallet_set_status rather than
+  // a direct .update(): the function authorises the caller itself, locks the
+  // row, and refuses to close a wallet that still holds funds.
+  //
+  // The returned row is the source of truth. Nothing is applied optimistically
+  // — on failure the modal and the card behind it both keep showing the real
+  // status instead of drifting apart.
   const setWalletStatus = async (
     wallet: WalletWithCustomer,
     status: 'active' | 'frozen' | 'closed'
@@ -1055,17 +1183,59 @@ export function WalletsPage() {
     setStatusUpdating(true);
     setStatusError(null);
     try {
-      const { error: rpcError } = await supabase.rpc('wallet_set_status', {
+      const { data, error: rpcError } = await walletSetStatus({
         p_wallet_id: wallet.id,
         p_status: status,
-      } as never);
-      if (rpcError) throw rpcError;
+      });
 
-      await loadData();
-      setDetailWallet((prev) => (prev && prev.id === wallet.id ? { ...prev, status } : prev));
+      if (rpcError) {
+        throw new Error(describeRpcError(rpcError, 'wallet_set_status'));
+      }
+
+      // SECURITY DEFINER functions can return null when a guard silently
+      // returns nothing; treat that as a failure rather than as success.
+      const returned = (Array.isArray(data) ? data[0] : data) as Tables<'wallets'> | null;
+      if (!returned) {
+        throw new Error('Status change was not applied. Please retry.');
+      }
+
+      const confirmedStatus = returned.status;
+
+      setAllWallets((prev) =>
+        prev.map((w) =>
+          w.id === wallet.id
+            ? { ...w, status: confirmedStatus, updated_at: returned.updated_at }
+            : w
+        )
+      );
+      setDetailWallet((prev) =>
+        prev && prev.id === wallet.id
+          ? { ...prev, status: confirmedStatus, updated_at: returned.updated_at }
+          : prev
+      );
+
+      // Reconcile against the server in the background so any trigger side
+      // effects land too, without blocking the button.
+      loadData();
     } catch (err) {
       console.error('Error updating wallet status:', err);
       setStatusError(err instanceof Error ? err.message : 'Failed to update wallet status');
+      // Pull the true row back so the modal cannot keep displaying a status
+      // that was never written.
+      try {
+        const { data: fresh } = await supabase
+          .from('wallets')
+          .select('*, customer:customers(*)')
+          .eq('id', wallet.id)
+          .maybeSingle();
+        if (fresh) {
+          const row = fresh as unknown as WalletWithCustomer;
+          setAllWallets((prev) => prev.map((w) => (w.id === wallet.id ? row : w)));
+          setDetailWallet((prev) => (prev && prev.id === wallet.id ? row : prev));
+        }
+      } catch {
+        // Non-fatal: the error banner already tells the operator what failed.
+      }
     } finally {
       setStatusUpdating(false);
     }
@@ -1077,32 +1247,63 @@ export function WalletsPage() {
   // a zero balance that should stop being usable.
   const handleDeleteWallet = async (wallet: WalletWithCustomer) => {
     if (!tenant) return;
-    if (Number(wallet.balance) !== 0 || Number(wallet.held_balance) !== 0) {
+    if (Number(wallet.balance ?? 0) !== 0 || Number(wallet.held_balance ?? 0) !== 0) {
       setDeleteError(
-        `This wallet still holds ${wallet.currency} ${Number(wallet.balance).toLocaleString(undefined, {
+        `This wallet still holds ${wallet.currency} ${Number(wallet.balance ?? 0).toLocaleString(undefined, {
           minimumFractionDigits: 2,
         })}. Move the funds out (or use "Close" instead of deleting) before deleting it.`
       );
       setConfirmDeleteId(null);
       return;
     }
-    setDeletingId(wallet.id);
+    const walletId = wallet.id;
+    setDeletingId(walletId);
     setDeleteError(null);
     try {
-      const { error: deleteErr } = await supabase
+      // `.select()` is what makes a rejected delete visible. Without it an
+      // RLS policy that forbids the delete returns { data: null, error: null }
+      // - success with nothing removed - and the optimistic filter below
+      // would hide the card until the next reload brought it straight back,
+      // which reads to the operator as a dead button.
+      const { data: deleted, error: deleteErr } = await supabase
         .from('wallets')
         .delete()
-        .eq('id', wallet.id)
-        .eq('tenant_id', tenant.id);
-      if (deleteErr) throw deleteErr;
-      await loadData();
-      setConfirmDeleteId(null);
-      if (detailWallet?.id === wallet.id) setDetailWallet(null);
+        .eq('id', walletId)
+        .eq('tenant_id', tenant.id)
+        .select('id');
+
+      if (deleteErr) {
+        // 23503: transactions still reference this wallet. The history is
+        // worth more than a tidy list, so closing is the right move.
+        if ((deleteErr as { code?: string }).code === '23503') {
+          throw new Error(
+            'This wallet has transaction history and cannot be deleted. Use "Close" instead, which stops it being used without losing the records.'
+          );
+        }
+        throw deleteErr;
+      }
+
+      if (!deleted || deleted.length === 0) {
+        throw new Error(
+          'The delete was rejected by the database. Your role may not have permission to remove wallets.'
+        );
+      }
+
+      // Only now is it safe to remove locally (functional update, so this
+      // holds even if other state updates - e.g. from the realtime
+      // subscription - are queued around the same time).
+      setAllWallets((prev) => prev.filter((w) => w.id !== walletId));
+      setConfirmDeleteId((prev) => (prev === walletId ? null : prev));
+      setDetailWallet((prev) => (prev?.id === walletId ? null : prev));
+
+      // Reconcile with the server in the background.
+      loadData();
     } catch (err) {
       console.error('Error deleting wallet:', err);
       setDeleteError(err instanceof Error ? err.message : 'Failed to delete wallet');
+      setConfirmDeleteId((prev) => (prev === walletId ? null : prev));
     } finally {
-      setDeletingId(null);
+      setDeletingId((prev) => (prev === walletId ? null : prev));
     }
   };
 
@@ -1129,12 +1330,12 @@ export function WalletsPage() {
           <h1 className="text-2xl font-bold text-[#641f60]">Wallets</h1>
           <p className="text-slate-600 mt-1">Manage customer wallet accounts and balances</p>
         </div>
-        <div className="flex items-center gap-2 flex-wrap">
+        <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:flex-wrap">
           {branch && (
             <div className="flex rounded-lg border border-slate-200 overflow-hidden">
               <button
                 onClick={() => setScope('branch')}
-                className={`px-3 py-2 text-sm font-medium ${
+                className={`flex-1 sm:flex-initial px-3 py-2 text-sm font-medium whitespace-nowrap ${
                   scope === 'branch' ? 'bg-[#641f60] text-white' : 'bg-white text-slate-600 hover:bg-slate-50'
                 }`}
               >
@@ -1142,7 +1343,7 @@ export function WalletsPage() {
               </button>
               <button
                 onClick={() => setScope('all')}
-                className={`px-3 py-2 text-sm font-medium ${
+                className={`flex-1 sm:flex-initial px-3 py-2 text-sm font-medium whitespace-nowrap ${
                   scope === 'all' ? 'bg-[#641f60] text-white' : 'bg-white text-slate-600 hover:bg-slate-50'
                 }`}
               >
@@ -1152,7 +1353,7 @@ export function WalletsPage() {
           )}
           <button
             onClick={openForm}
-            className="inline-flex items-center gap-2 px-4 py-2.5 bg-[#ee7b22] hover:bg-[#c46040] text-white font-medium rounded-lg shadow-lg hover:shadow-xl transition-all"
+            className="inline-flex items-center justify-center gap-2 w-full sm:w-auto px-4 py-2.5 bg-[#ee7b22] hover:bg-[#c46040] text-white font-medium rounded-lg shadow-lg hover:shadow-xl transition-all"
           >
             <Plus className="w-5 h-5" />
             Create Wallet
@@ -1185,9 +1386,9 @@ export function WalletsPage() {
           ================================================================ */}
       {!loading && wallets.length > 0 && (
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-          <div className="group bg-white rounded-xl border border-slate-200 p-5 transition-all duration-200 hover:shadow-lg hover:shadow-slate-200/60 hover:-translate-y-0.5 hover:border-[#641f60]/30">
+          <div className="group bg-white rounded-xl border border-slate-200 p-3.5 sm:p-5 transition-all duration-200 hover:shadow-lg hover:shadow-slate-200/60 hover:-translate-y-0.5 hover:border-[#641f60]/30">
             <div className="flex items-center justify-between mb-3">
-              <div className="w-10 h-10 rounded-lg bg-[#641f60]/10 flex items-center justify-center transition-colors group-hover:bg-[#641f60]/15">
+              <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-lg bg-[#641f60]/10 flex items-center justify-center transition-colors group-hover:bg-[#641f60]/15">
                 <WalletIcon className="w-5 h-5 text-[#641f60]" />
               </div>
               <span className="text-xs text-slate-400">
@@ -1195,12 +1396,12 @@ export function WalletsPage() {
               </span>
             </div>
             <p className="text-xs font-medium text-slate-500 mb-1">Total wallets</p>
-            <p className="text-2xl font-bold text-[#641f60] tabular-nums">{book.total}</p>
+            <p className="text-xl sm:text-2xl font-bold text-[#641f60] tabular-nums">{book.total}</p>
           </div>
 
-          <div className="group bg-white rounded-xl border border-slate-200 p-5 transition-all duration-200 hover:shadow-lg hover:shadow-slate-200/60 hover:-translate-y-0.5 hover:border-[#1ebcb2]/40">
+          <div className="group bg-white rounded-xl border border-slate-200 p-3.5 sm:p-5 transition-all duration-200 hover:shadow-lg hover:shadow-slate-200/60 hover:-translate-y-0.5 hover:border-[#1ebcb2]/40">
             <div className="flex items-center justify-between mb-3">
-              <div className="w-10 h-10 rounded-lg bg-[#1ebcb2]/10 flex items-center justify-center transition-colors group-hover:bg-[#1ebcb2]/20">
+              <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-lg bg-[#1ebcb2]/10 flex items-center justify-center transition-colors group-hover:bg-[#1ebcb2]/20">
                 <CheckCircle className="w-5 h-5 text-[#1ebcb2]" />
               </div>
               {book.frozen > 0 && (
@@ -1208,29 +1409,29 @@ export function WalletsPage() {
               )}
             </div>
             <p className="text-xs font-medium text-slate-500 mb-1">Active</p>
-            <p className="text-2xl font-bold text-[#159089] tabular-nums">{book.active}</p>
+            <p className="text-xl sm:text-2xl font-bold text-[#159089] tabular-nums">{book.active}</p>
           </div>
 
-          <div className="group bg-white rounded-xl border border-slate-200 p-5 transition-all duration-200 hover:shadow-lg hover:shadow-slate-200/60 hover:-translate-y-0.5 hover:border-[#ee7b22]/40">
+          <div className="group bg-white rounded-xl border border-slate-200 p-3.5 sm:p-5 transition-all duration-200 hover:shadow-lg hover:shadow-slate-200/60 hover:-translate-y-0.5 hover:border-[#ee7b22]/40">
             <div className="flex items-center justify-between mb-3">
-              <div className="w-10 h-10 rounded-lg bg-[#ee7b22]/10 flex items-center justify-center transition-colors group-hover:bg-[#ee7b22]/20">
+              <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-lg bg-[#ee7b22]/10 flex items-center justify-center transition-colors group-hover:bg-[#ee7b22]/20">
                 <Lock className="w-5 h-5 text-[#ee7b22]" />
               </div>
             </div>
             <p className="text-xs font-medium text-slate-500 mb-1">Funds held</p>
-            <p className="text-2xl font-bold text-[#ee7b22] tabular-nums">
+            <p className="text-xl sm:text-2xl font-bold text-[#ee7b22] tabular-nums">
               {book.heldShare.toFixed(1)}%
             </p>
           </div>
 
-          <div className="group bg-white rounded-xl border border-slate-200 p-5 transition-all duration-200 hover:shadow-lg hover:shadow-slate-200/60 hover:-translate-y-0.5 hover:border-slate-300">
+          <div className="group bg-white rounded-xl border border-slate-200 p-3.5 sm:p-5 transition-all duration-200 hover:shadow-lg hover:shadow-slate-200/60 hover:-translate-y-0.5 hover:border-slate-300">
             <div className="flex items-center justify-between mb-3">
-              <div className="w-10 h-10 rounded-lg bg-slate-100 flex items-center justify-center transition-colors group-hover:bg-slate-200">
+              <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-lg bg-slate-100 flex items-center justify-center transition-colors group-hover:bg-slate-200">
                 <Coins className="w-5 h-5 text-slate-500" />
               </div>
             </div>
             <p className="text-xs font-medium text-slate-500 mb-1">Empty wallets</p>
-            <p className="text-2xl font-bold text-slate-600 tabular-nums">{book.empty}</p>
+            <p className="text-xl sm:text-2xl font-bold text-slate-600 tabular-nums">{book.empty}</p>
           </div>
         </div>
       )}
@@ -1282,6 +1483,23 @@ export function WalletsPage() {
           <button
             onClick={() => setDeleteError(null)}
             className="text-[#c46040] hover:text-[#641f60] flex-shrink-0"
+            aria-label="Dismiss"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
+      {/* Delete failures surface here as well as in the detail panel, so a
+          rejection triggered from a card is not swallowed silently. */}
+      {deleteError && !detailWallet && (
+        <div className="bg-[#c46040]/10 border border-[#c46040]/30 rounded-xl px-4 py-3 flex items-start gap-3 text-sm">
+          <AlertCircle className="w-5 h-5 text-[#c46040] flex-shrink-0 mt-0.5" />
+          <span className="flex-1 text-[#c46040]">{deleteError}</span>
+          <button
+            type="button"
+            onClick={() => setDeleteError(null)}
+            className="text-[#c46040] hover:opacity-70 flex-shrink-0"
             aria-label="Dismiss"
           >
             <X className="w-4 h-4" />
@@ -1380,9 +1598,9 @@ export function WalletsPage() {
                       </button>
                     </div>
                   ) : (
-                    <div className="border-t border-[#c46040]/20 bg-[#c46040]/5 px-3 py-2.5 flex items-center justify-between gap-2">
+                    <div className="border-t border-[#c46040]/20 bg-[#c46040]/5 px-3 py-2.5 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
                       <span className="text-xs text-[#c46040] font-medium">Delete this wallet?</span>
-                      <div className="flex items-center gap-1.5 flex-shrink-0">
+                      <div className="flex items-center justify-end gap-1.5 flex-shrink-0">
                         <button
                           onClick={() => setConfirmDeleteId(null)}
                           disabled={deletingId === wallet.id}
@@ -1629,18 +1847,18 @@ export function WalletsPage() {
                 </div>
               </div>
 
-              <div className="grid grid-cols-3 gap-3 text-center">
-                <div className="p-3 rounded-lg bg-[#641f60]/5">
-                  <p className="text-xs text-slate-500">Balance</p>
-                  <p className="text-sm sm:text-base font-bold text-slate-900">{format(detailWallet.balance, detailWallet.currency)}</p>
+              <div className="grid grid-cols-3 gap-2 sm:gap-3 text-center">
+                <div className="p-2 sm:p-3 rounded-lg bg-[#641f60]/5 min-w-0">
+                  <p className="text-[11px] sm:text-xs text-slate-500">Balance</p>
+                  <p className="text-xs sm:text-base font-bold text-slate-900 break-words">{format(detailWallet.balance, detailWallet.currency)}</p>
                 </div>
-                <div className="p-3 rounded-lg bg-[#1ebcb2]/10">
-                  <p className="text-xs text-slate-500">Available</p>
-                  <p className="text-sm sm:text-base font-bold text-slate-900">{format(detailWallet.available_balance, detailWallet.currency)}</p>
+                <div className="p-2 sm:p-3 rounded-lg bg-[#1ebcb2]/10 min-w-0">
+                  <p className="text-[11px] sm:text-xs text-slate-500">Available</p>
+                  <p className="text-xs sm:text-base font-bold text-slate-900 break-words">{format(detailWallet.available_balance, detailWallet.currency)}</p>
                 </div>
-                <div className="p-3 rounded-lg bg-[#ee7b22]/10">
-                  <p className="text-xs text-slate-500">Held</p>
-                  <p className="text-sm sm:text-base font-bold text-slate-900">{format(detailWallet.held_balance, detailWallet.currency)}</p>
+                <div className="p-2 sm:p-3 rounded-lg bg-[#ee7b22]/10 min-w-0">
+                  <p className="text-[11px] sm:text-xs text-slate-500">Held</p>
+                  <p className="text-xs sm:text-base font-bold text-slate-900 break-words">{format(detailWallet.held_balance, detailWallet.currency)}</p>
                 </div>
               </div>
 
@@ -1675,8 +1893,7 @@ export function WalletsPage() {
                 )}
               </div>
 
-              {/* Money movement — none of this existed before: a wallet's
-                  balance could never change from the UI at all. */}
+              {/* Money movement */}
               {detailWallet.status === 'active' && (
                 <div className="border-t border-slate-200 pt-4">
                   <p className="text-xs font-medium text-slate-500 mb-2">Move Money</p>
@@ -1727,8 +1944,9 @@ export function WalletsPage() {
                 </div>
               )}
 
-              {/* Account status actions — the status column existed and was
-                  displayed, but nothing could actually change it before. */}
+              {/* Account status actions. Buttons reflect the confirmed server
+                  status; a wallet holding funds cannot be closed, and the
+                  reason is shown before the click rather than after. */}
               <div className="border-t border-slate-200 pt-4">
                 <p className="text-xs font-medium text-slate-500 mb-2">Account Status</p>
                 <div className="flex flex-wrap gap-2">
@@ -1739,7 +1957,11 @@ export function WalletsPage() {
                       disabled={statusUpdating}
                       className="inline-flex items-center gap-1.5 px-3 py-2 bg-[#1ebcb2] hover:bg-[#159089] text-white text-sm font-medium rounded-lg transition-colors disabled:opacity-40"
                     >
-                      <RotateCcw className="w-4 h-4" />
+                      {statusUpdating ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <RotateCcw className="w-4 h-4" />
+                      )}
                       Reactivate
                     </button>
                   )}
@@ -1750,7 +1972,11 @@ export function WalletsPage() {
                       disabled={statusUpdating}
                       className="inline-flex items-center gap-1.5 px-3 py-2 border border-[#ee7b22] text-[#ee7b22] hover:bg-[#ee7b22]/10 text-sm font-medium rounded-lg transition-colors disabled:opacity-40"
                     >
-                      <AlertCircle className="w-4 h-4" />
+                      {statusUpdating ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <AlertCircle className="w-4 h-4" />
+                      )}
                       Freeze
                     </button>
                   )}
@@ -1758,19 +1984,43 @@ export function WalletsPage() {
                     <button
                       type="button"
                       onClick={() => setWalletStatus(detailWallet, 'closed')}
-                      disabled={statusUpdating}
-                      className="inline-flex items-center gap-1.5 px-3 py-2 border border-[#c46040] text-[#c46040] hover:bg-[#c46040]/10 text-sm font-medium rounded-lg transition-colors disabled:opacity-40"
+                      disabled={
+                        statusUpdating ||
+                        Number(detailWallet.balance || 0) !== 0 ||
+                        Number(detailWallet.held_balance || 0) !== 0
+                      }
+                      title={
+                        Number(detailWallet.balance || 0) !== 0 ||
+                        Number(detailWallet.held_balance || 0) !== 0
+                          ? 'Move the funds out before closing this wallet'
+                          : 'Stop this wallet from being used'
+                      }
+                      className="inline-flex items-center gap-1.5 px-3 py-2 border border-[#c46040] text-[#c46040] hover:bg-[#c46040]/10 text-sm font-medium rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                     >
-                      <Ban className="w-4 h-4" />
+                      {statusUpdating ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <Ban className="w-4 h-4" />
+                      )}
                       Close
                     </button>
                   )}
                 </div>
                 {statusError && (
-                  <p className="text-xs text-[#c46040] mt-2 flex items-center gap-1.5">
-                    <AlertCircle className="w-3.5 h-3.5 flex-shrink-0" />
-                    {statusError}
-                  </p>
+                  <div className="mt-2 p-2.5 bg-[#c46040]/10 border border-[#c46040]/30 rounded-lg flex items-start justify-between gap-2">
+                    <p className="text-xs text-[#c46040] flex items-start gap-1.5">
+                      <AlertCircle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+                      {statusError}
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => setStatusError(null)}
+                      className="text-[#c46040] hover:text-[#641f60] flex-shrink-0"
+                      aria-label="Dismiss"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
                 )}
               </div>
 
@@ -1864,9 +2114,9 @@ export function WalletsPage() {
             {/* Fixed footer */}
             <div className="px-4 sm:px-6 py-4 border-t border-slate-200 flex-shrink-0 bg-white">
               {confirmDeleteId === detailWallet.id ? (
-                <div className="flex items-center justify-between gap-3">
+                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
                   <span className="text-sm text-[#c46040] font-medium">Delete this wallet?</span>
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center justify-end gap-2">
                     <button
                       onClick={() => setConfirmDeleteId(null)}
                       disabled={deletingId === detailWallet.id}
@@ -1885,27 +2135,27 @@ export function WalletsPage() {
                   </div>
                 </div>
               ) : (
-                <div className="flex items-center gap-3">
+                <div className="flex flex-wrap items-center gap-2 sm:gap-3">
                   <button
                     onClick={() => {
                       setDeleteError(null);
                       setConfirmDeleteId(detailWallet.id);
                     }}
-                    className="px-4 py-2.5 border border-[#c46040]/30 text-[#c46040] font-medium rounded-lg hover:bg-[#c46040]/10 transition-colors flex items-center gap-2"
+                    className="flex-1 sm:flex-initial justify-center px-4 py-2.5 border border-[#c46040]/30 text-[#c46040] font-medium rounded-lg hover:bg-[#c46040]/10 transition-colors flex items-center gap-2"
                   >
                     <Trash2 className="w-4 h-4" />
                     Delete
                   </button>
                   <button
                     onClick={() => openEditForm(detailWallet)}
-                    className="px-4 py-2.5 border border-slate-300 text-slate-700 font-medium rounded-lg hover:bg-slate-50 transition-colors flex items-center gap-2"
+                    className="flex-1 sm:flex-initial justify-center px-4 py-2.5 border border-slate-300 text-slate-700 font-medium rounded-lg hover:bg-slate-50 transition-colors flex items-center gap-2"
                   >
                     <Pencil className="w-4 h-4" />
                     Edit
                   </button>
                   <button
                     onClick={() => setDetailWallet(null)}
-                    className="flex-1 px-6 py-2.5 bg-[#641f60] hover:bg-[#4a1646] text-white font-medium rounded-lg transition-colors"
+                    className="w-full sm:w-auto sm:flex-1 px-6 py-2.5 bg-[#641f60] hover:bg-[#4a1646] text-white font-medium rounded-lg transition-colors"
                   >
                     Done
                   </button>
