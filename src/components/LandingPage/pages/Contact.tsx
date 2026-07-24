@@ -1,3 +1,4 @@
+import type { MouseEvent } from 'react';
 import { Building2, Clock, Globe, Mail, MessageSquare, Phone, Send, User } from 'lucide-react';
 
 const EMAIL = 'hello@trustseedmicrofinanceenterprises.com';
@@ -8,7 +9,18 @@ const MAIL_BODY = 'Hello TrustSeed team,\n\nI would like to know more about your
 const mailtoHref = `mailto:${EMAIL}?subject=${encodeURIComponent(MAIL_SUBJECT)}&body=${encodeURIComponent(MAIL_BODY)}`;
 const gmailHref = `https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(EMAIL)}&su=${encodeURIComponent(MAIL_SUBJECT)}&body=${encodeURIComponent(MAIL_BODY)}`;
 
-const contactDetails = [
+type ContactDetail = {
+  icon: typeof Building2;
+  label: string;
+  value: string;
+  href?: string;
+  external?: boolean;
+  isEmail?: boolean;
+  color: string;
+  breakAll: boolean;
+};
+
+const contactDetails: ContactDetail[] = [
   {
     icon: Building2,
     label: 'Office',
@@ -47,8 +59,8 @@ const contactDetails = [
 ];
 
 export function Contact() {
-  const handleEmailClick = (e: React.MouseEvent<HTMLAnchorElement>) => {
-    if (e.metaKey || e.ctrlKey || e.button !== 0) return;
+  const handleEmailClick = (e: MouseEvent<HTMLAnchorElement>) => {
+    if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
 
     e.preventDefault();
 
@@ -93,6 +105,7 @@ export function Contact() {
             {contactDetails.map((detail, idx) => {
               const Icon = detail.icon;
               const isLink = Boolean(detail.href);
+
               const content = (
                 <div
                   className={`flex items-start gap-4 bg-white rounded-xl p-4 sm:p-5 border border-slate-200 shadow-sm transition-all w-full min-w-0 ${
@@ -120,21 +133,26 @@ export function Contact() {
                 </div>
               );
 
-              return detail.href ? (
+              if (!detail.href) {
+                return (
+                  <div key={idx} className="w-full min-w-0">
+                    {content}
+                  </div>
+                );
+              }
+
+              return (
                 
                   key={idx}
                   href={detail.href}
                   onClick={detail.isEmail ? handleEmailClick : undefined}
-                  {...(detail.external ? { target: '_blank', rel: 'noopener noreferrer' } : {})}
+                  target={detail.external ? '_blank' : undefined}
+                  rel={detail.external ? 'noopener noreferrer' : undefined}
                   aria-label={`${detail.label}: ${detail.value}`}
                   className="group block w-full min-w-0 rounded-xl focus:outline-none focus-visible:ring-2 focus-visible:ring-[#1ebcb2]"
                 >
                   {content}
                 </a>
-              ) : (
-                <div key={idx} className="w-full min-w-0">
-                  {content}
-                </div>
               );
             })}
 
@@ -143,7 +161,9 @@ export function Contact() {
                 <Clock className="w-5 h-5 text-white" />
               </div>
               <div className="min-w-0 flex-1 overflow-hidden">
-                <p className="text-xs font-medium uppercase tracking-wide text-white/70 mb-0.5">Response Time</p>
+                <p className="text-xs font-medium uppercase tracking-wide text-white/70 mb-0.5">
+                  Response Time
+                </p>
                 <p className="text-white font-medium break-words">We reply within 24 hours, Mon–Fri</p>
               </div>
             </div>
